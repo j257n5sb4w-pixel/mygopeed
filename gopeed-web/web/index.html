@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gopeed</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234c8dff'/%3E%3Cpath d='M16 8v11m0 0l-4.5-4.5M16 19l4.5-4.5M9 23h14' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
+<style>
+  :root { color-scheme: light dark; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #f6f7f9; }
+  @media (prefers-color-scheme: dark) { html, body { background: #16181d; } }
+  #mygo { position: fixed; inset: 0; }
+  #boot {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 14px; font: 14px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    color: #6b7280; background: inherit; transition: opacity .25s ease; z-index: 10;
+  }
+  #boot.hide { opacity: 0; pointer-events: none; }
+  .spinner {
+    width: 26px; height: 26px; border: 3px solid rgba(128,128,128,.25);
+    border-top-color: #4c8dff; border-radius: 50%; animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #err { max-width: 640px; padding: 0 24px; text-align: center; color: #d64545; font-family: ui-monospace, monospace; font-size: 12px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div id="mygo"></div>
+<div id="boot">
+  <div class="spinner"></div>
+  <div id="msg">正在加载界面…（首次约 20 MB）</div>
+  <div id="err"></div>
+</div>
+<script src="wasm_exec.js"></script>
+<script>
+  const boot = document.getElementById('boot');
+  const msg = document.getElementById('msg');
+  const err = document.getElementById('err');
+  const fail = (e) => {
+    document.querySelector('.spinner').style.display = 'none';
+    msg.textContent = '加载失败';
+    err.textContent = (e && (e.stack || e.message)) || String(e);
+  };
+  if (!WebAssembly.instantiateStreaming) {
+    window.onerror = fail;
+  }
+  const go = new Go();
+  let inst;
+  WebAssembly.instantiateStreaming(fetch('app.wasm?v=20261111f'), go.importObject)
+    .then((r) => { inst = r.instance; return go.run(inst); })
+    .then(() => {
+      // Go 程序退出（正常不会发生）
+      fail('程序已退出');
+    })
+    .catch((e) => {
+      // 某些服务器不给 application/wasm 类型，instantiateStreaming 会失败，退回字节数组
+      if (e instanceof TypeError || (e && /MIME|magic|failed to fetch/i.test(e.message || ''))) {
+        return fetch('app.wasm?v=20261111f')
+          .then((r) => r.arrayBuffer())
+          .then((buf) => WebAssembly.instantiate(buf, go.importObject))
+          .then((r) => go.run(r.instance))
+          .catch(fail);
+      }
+      fail(e);
+    });
+  // Go 侧一旦画出第一帧就会隐藏遮罩；这里给个兜底超时，避免一直白屏
+  setTimeout(() => {
+    if (!boot.classList.contains('hide')) {
+      msg.textContent = '仍在初始化…如果长时间无响应，按 F5 刷新';
+    }
+  }, 8000);
+  window.__mygoBoot = { hide: () => boot.classList.add('hide'), fail };
+</script>
+</body>
+</html>

@@ -1,0 +1,59 @@
+--- a/pkg/download/downloader.go
++++ b/pkg/download/downloader.go
+@@ -1082,6 +1082,14 @@
+ 			autoExtractEnabled = cfg.Archive.AutoExtract
+ 		}
+ 
++		// Determine if the archive should be deleted after extraction.
++		// The per-task flag wins; otherwise fall back to the global config.
++		// (Upstream only reads Archive.AutoExtract here, so the global
++		// archive.deleteAfterExtract switch had no effect at all.)
++		if !e.DeleteAfterExtract && cfg != nil && cfg.Archive != nil {
++			e.DeleteAfterExtract = cfg.Archive.DeleteAfterExtract
++		}
++
+ 		// Auto-extract archive files using the extraction queue
+ 		// This ensures only one extraction runs at a time to prevent resource exhaustion
+ 		if autoExtractEnabled && isArchiveFile(downloadFilePath) {
+@@ -1706,6 +1716,9 @@
+ 	return files
+ }
+ 
++// archiveDeleteDelay is how long an archive stays on disk after a successful extraction
++const archiveDeleteDelay = 5 * time.Second
++
+ // handleExtractionResult handles the result of an extraction operation
+ func (d *Downloader) handleExtractionResult(task *Task, extractErr error, archiveFiles []string, deleteAfterExtract bool) {
+ 	if extractErr != nil {
+@@ -1720,16 +1733,23 @@
+ 		d.emit(EventKeyProgress, task)
+ 		d.storage.Put(bucketTask, task.ID, task.clone())
+ 
+-		// Delete archive files after successful extraction if enabled
++		// Delete archive files after successful extraction if enabled.
++		// The removal is delayed and runs in its own goroutine: the archive
++		// stays around for a few seconds after extraction finishes, and a
++		// slow delete never blocks the single-threaded extraction queue.
+ 		if deleteAfterExtract {
+-			for _, archiveFile := range archiveFiles {
+-				deleteErr := os.Remove(archiveFile)
+-				if deleteErr != nil {
+-					d.Logger.Error().Err(deleteErr).Msgf("delete archive after extraction failed: %s", archiveFile)
+-				} else {
+-					d.Logger.Info().Msgf("archive deleted after extraction: %s", archiveFile)
++			files := append([]string(nil), archiveFiles...)
++			go func() {
++				time.Sleep(archiveDeleteDelay)
++				for _, archiveFile := range files {
++					deleteErr := os.Remove(archiveFile)
++					if deleteErr != nil {
++						d.Logger.Error().Err(deleteErr).Msgf("delete archive after extraction failed: %s", archiveFile)
++					} else {
++						d.Logger.Info().Msgf("archive deleted after extraction: %s", archiveFile)
++					}
+ 				}
+-			}
++			}()
+ 		}
+ 	}
+ }

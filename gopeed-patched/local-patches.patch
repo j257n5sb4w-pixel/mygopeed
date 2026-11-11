@@ -1,0 +1,702 @@
+diff -urN a/internal/protocol/bt/fetcher.go b/internal/protocol/bt/fetcher.go
+--- a/internal/protocol/bt/fetcher.go	2026-11-11 18:09:40.152200000 +0800
++++ b/internal/protocol/bt/fetcher.go	2026-11-11 18:09:40.204432500 +0800
+@@ -142,13 +142,42 @@
+ func (f *Fetcher) Close() (err error) {
+ 	f.safeDrop()
+ 	f.torrentDropFunc()
+-	f.uploadDoneCh <- nil
+-	if len(client.Torrents()) == 0 {
++	// uploadDoneCh has capacity one; a second Close (for example after
++	// DetachForRename already signalled) must not block forever.
++	select {
++	case f.uploadDoneCh <- nil:
++	default:
++	}
++	// client is nil once closeClient() ran (for example the previous task closed
++	// it), and Torrents() dereferences the receiver, so it has to be guarded.
++	if client != nil && len(client.Torrents()) == 0 {
+ 		err = closeClient()
+ 	}
+ 	return nil
+ }
+ 
++// DetachForRename stops seeding and drops the torrent from the client without
++// closing the shared client.
++//
++// A finished BT task keeps seeding, and anacrolix recreates the missing data
++// under the old name as soon as it notices that a file vanished. Renaming the
++// download result while the torrent is still attached therefore makes anacrolix
++// bring back a ".part" file next to the renamed one (and in the worst case hit a
++// panic inside servePeerRequest). Detaching first makes the rename safe while
++// leaving other BT tasks untouched.
++func (f *Fetcher) DetachForRename() {
++	f.safeDrop()
++	if f.torrentDropFunc != nil {
++		f.torrentDropFunc()
++	}
++	// uploadDoneCh has capacity one and WaitUpload consumes it exactly once, so a
++	// second Close/Detach must not block forever.
++	select {
++	case f.uploadDoneCh <- nil:
++	default:
++	}
++}
++
+ func (f *Fetcher) safeDrop() {
+ 	defer func() {
+ 		// ignore panic
+diff -urN a/pkg/base/model.go b/pkg/base/model.go
+--- a/pkg/base/model.go	2026-11-11 18:09:40.112688000 +0800
++++ b/pkg/base/model.go	2026-11-11 18:09:40.169705300 +0800
+@@ -4,6 +4,8 @@
+ 	"fmt"
+ 	"net/http"
+ 	"net/url"
++	syspath "path"
++	"strings"
+ 	"sync"
+ 	"time"
+ 
+@@ -118,6 +120,13 @@
+ 	SelectFiles []int `json:"selectFiles"`
+ 	// Extra info for specific fetcher
+ 	Extra any `json:"extra"`
++	// Rename is the name the download result gets once the download is done.
++	//
++	// It is a bare file name (no directory separator). For a single file task the
++	// original extension is kept when Rename has none; for a multi file task the
++	// torrent folder is renamed. After a successful rename Name is updated to the
++	// new base name, so task display and "delete with files" follow the new name.
++	Rename string `json:"rename"`
+ }
+ 
+ func (o *Options) InitSelectFiles(fileSize int) {
+@@ -188,6 +197,19 @@
+ 	AutoTorrent                *AutoTorrentConfig     `json:"autoTorrent"`                // AutoTorrent is the auto torrent task creation configuration
+ 	Archive                    *ArchiveConfig         `json:"archive"`                    // Archive is the archive extraction configuration
+ 	AutoDeleteMissingFileTasks bool                   `json:"autoDeleteMissingFileTasks"` // AutoDeleteMissingFileTasks enables automatic deletion of tasks with missing files
++	PathMappings               []PathMapping          `json:"pathMappings"`               // PathMappings rewrites incoming download directories to real on-disk directories
++}
++
++// PathMapping rewrites a download directory prefix.
++//
++// The caller (a panel, another service on the same network, ...) may use a path
++// that only makes sense in its own world mount namespace, e.g. /media/anime. The
++// downloader runs on a different machine/host mount, where the same place is
++// /mnt/nas/media/anime. Mappings are applied longest-From-prefix first; the rest
++// of the path is kept verbatim and unconditional ".." segments are rejected.
++type PathMapping struct {
++	From string `json:"from"`
++	To   string `json:"to"`
+ }
+ 
+ func (cfg *DownloaderStoreConfig) Init() *DownloaderStoreConfig {
+@@ -218,9 +240,49 @@
+ 			DeleteAfterExtract: false,
+ 		}
+ 	}
++	if cfg.PathMappings == nil {
++		cfg.PathMappings = []PathMapping{}
++	}
+ 	return cfg
+ }
+ 
++// MapPath rewrites a download directory through the configured path mappings.
++//
++// The mapping with the longest matching From prefix wins; the remainder of the
++// path is appended to To verbatim. Paths that match no mapping are returned
++// unchanged, so an empty configuration is always a no-op.
++func (cfg *DownloaderStoreConfig) MapPath(p string) string {
++	if cfg == nil || p == "" || len(cfg.PathMappings) == 0 {
++		return p
++	}
++	clean := syspath.Clean(p)
++	bestLen := -1
++	var bestTo, bestRel string
++	for _, m := range cfg.PathMappings {
++		from := syspath.Clean(strings.TrimSpace(m.From))
++		to := syspath.Clean(strings.TrimSpace(m.To))
++		if from == "" || from == "." || to == "" || to == "." {
++			continue
++		}
++		if clean != from && !strings.HasPrefix(clean, from+"/") {
++			continue
++		}
++		if len(from) <= bestLen {
++			continue
++		}
++		bestLen = len(from)
++		bestTo = to
++		bestRel = strings.TrimPrefix(strings.TrimPrefix(clean, from), "/")
++	}
++	if bestLen < 0 {
++		return p
++	}
++	if bestRel == "" {
++		return bestTo
++	}
++	return syspath.Join(bestTo, bestRel)
++}
++
+ func (cfg *DownloaderStoreConfig) Merge(beforeCfg *DownloaderStoreConfig) *DownloaderStoreConfig {
+ 	if beforeCfg == nil {
+ 		return cfg
+@@ -252,6 +314,9 @@
+ 	if cfg.Archive == nil {
+ 		cfg.Archive = beforeCfg.Archive
+ 	}
++	if cfg.PathMappings == nil {
++		cfg.PathMappings = beforeCfg.PathMappings
++	}
+ 	return cfg
+ }
+ 
+@@ -277,6 +342,9 @@
+ type ArchiveConfig struct {
+ 	AutoExtract        bool `json:"autoExtract"`        // AutoExtract enables automatic extraction of archives after download
+ 	DeleteAfterExtract bool `json:"deleteAfterExtract"` // DeleteAfterExtract deletes the archive after successful extraction
++	// Passwords is a list of candidate passwords for encrypted archives.
++	// They are tried from top to bottom until one works.
++	Passwords []string `json:"passwords"`
+ }
+ 
+ type DownloaderProxyConfig struct {
+diff -urN a/pkg/download/downloader.go b/pkg/download/downloader.go
+--- a/pkg/download/downloader.go	2026-11-11 18:09:40.134687000 +0800
++++ b/pkg/download/downloader.go	2026-11-11 18:09:40.187431500 +0800
+@@ -7,6 +7,7 @@
+ 	gohttp "net/http"
+ 	"net/url"
+ 	"os"
++	"path"
+ 	"path/filepath"
+ 	"runtime/debug"
+ 	"sort"
+@@ -1025,6 +1026,11 @@
+ 	task.Progress.Downloaded = totalSize
+ 	task.updateStatus(base.DownloadStatusDone)
+ 	d.storage.Put(bucketTask, task.ID, task.clone())
++
++	// Rename the finished download before any post-processing reads the on-disk
++	// path (auto torrent, auto extract), so they all see the final name.
++	d.applyRename(task)
++
+ 	d.emit(EventKeyDone, task)
+ 	d.emit(EventKeyFinally, task, err)
+ 	d.notifyRunning()
+@@ -1082,6 +1088,14 @@
+ 			autoExtractEnabled = cfg.Archive.AutoExtract
+ 		}
+ 
++		// Determine if the archive should be deleted after extraction.
++		// The per-task flag wins; otherwise fall back to the global config.
++		// (Upstream only reads Archive.AutoExtract here, so the global
++		// archive.deleteAfterExtract switch had no effect at all.)
++		if !e.DeleteAfterExtract && cfg != nil && cfg.Archive != nil {
++			e.DeleteAfterExtract = cfg.Archive.DeleteAfterExtract
++		}
++
+ 		// Auto-extract archive files using the extraction queue
+ 		// This ensures only one extraction runs at a time to prevent resource exhaustion
+ 		if autoExtractEnabled && isArchiveFile(downloadFilePath) {
+@@ -1090,6 +1104,103 @@
+ 	}
+ }
+ 
++// applyRename renames the finished download result to the name the caller asked
++// for in Options.Rename and then forgets the request.
++func (d *Downloader) applyRename(task *Task) {
++	if task.Meta == nil || task.Meta.Opts == nil {
++		return
++	}
++	want := strings.TrimSpace(task.Meta.Opts.Rename)
++	if want == "" {
++		return
++	}
++	task.Meta.Opts.Rename = ""
++	if err := d.renameResult(task, want); err != nil {
++		d.Logger.Warn().Err(err).Msgf("rename download result failed, task id: %s", task.ID)
++	} else {
++		// The data was renamed, so seeding it any more would make the torrent
++		// client recreate the old files (as .part) next to the new name. Mark
++		// the task as not uploading so a restart does not resume upload either.
++		task.Uploading = false
++	}
++	d.saveTask(task)
++}
++
++// renameResult performs the in-place rename of a finished task.
++//
++// The result stays in the same directory, an existing target is never
++// overwritten, and a single file keeps its original extension when the new name
++// carries none. On success Opts.Name is updated to the new base name, so the
++// panel displays it and doDelete(force) removes the renamed result.
++func (d *Downloader) renameResult(task *Task, want string) error {
++	if task.Meta.Res == nil || len(task.Meta.Res.Files) == 0 {
++		return errors.New("任务没有可用的下载结果")
++	}
++	name, err := cleanRenameName(want)
++	if err != nil {
++		return err
++	}
++
++	// A resource with a name is a torrent folder, everything else is one file.
++	multi := task.Meta.Res.Name != ""
++	old := task.Meta.SingleFilepath()
++	if multi {
++		old = task.Meta.FolderPath()
++	}
++	if !multi {
++		if ext := path.Ext(old); ext != "" && path.Ext(name) == "" {
++			name += ext
++		}
++	}
++	if _, statErr := os.Stat(old); statErr != nil {
++		return fmt.Errorf("找不到下载结果 %s: %w", old, statErr)
++	}
++
++	dst := path.Join(path.Dir(old), name)
++	if dst != old {
++		if _, statErr := os.Stat(dst); statErr == nil {
++			return fmt.Errorf("目标 %s 已存在，没有覆盖", dst)
++		} else if !errors.Is(statErr, os.ErrNotExist) {
++			return statErr
++		}
++		// A seeding BT task would recreate the old data next to the renamed one,
++		// so detach it from the torrent client before touching the filesystem.
++		if detacher, ok := task.fetcher.(interface{ DetachForRename() }); ok {
++			detacher.DetachForRename()
++		}
++		if err := os.Rename(old, dst); err != nil {
++			return err
++		}
++	}
++
++	task.Meta.Opts.Name = name
++	if multi {
++		task.Meta.Res.Name = name
++	} else {
++		task.Meta.Res.Files[0].Name = name
++	}
++	return nil
++}
++
++// cleanRenameName validates and sanitizes a caller supplied rename value.
++func cleanRenameName(want string) (string, error) {
++	name := strings.TrimSpace(want)
++	if name == "" {
++		return "", errors.New("重命名不能为空")
++	}
++	if name == "." || name == ".." {
++		return "", errors.New("重命名不合法")
++	}
++	if strings.ContainsAny(name, `/\`) {
++		return "", errors.New("重命名只能是文件名，不能带目录分隔符")
++	}
++	name = util.SafeFilename(name)
++	if name == "" || name == "." || name == ".." {
++		return "", errors.New("重命名不合法")
++	}
++	return name, nil
++}
++
+ func (d *Downloader) doOnError(task *Task, err error) {
+ 	d.Logger.Warn().Err(err).Msgf("task download failed, task id: %s", task.ID)
+ 	task.updateStatus(base.DownloadStatusError)
+@@ -1197,6 +1308,13 @@
+ 	// Replace placeholders in download path (e.g., %year%, %month%, %day%, %date%)
+ 	opts.Path = util.ReplacePathPlaceholders(opts.Path)
+ 
++	// Rewrite the caller's directory through the configured path mappings, so a
++	// panel can keep using its own mount layout while the files land where this
++	// machine actually mounts the storage.
++	if storeConfig, err := d.GetConfig(); err == nil {
++		opts.Path = storeConfig.MapPath(opts.Path)
++	}
++
+ 	// if enable white download directory, check if the download directory is in the white list
+ 	if len(d.cfg.WhiteDownloadDirs) > 0 {
+ 		inWhiteList := false
+@@ -1551,7 +1669,8 @@
+ 	d.storage.Put(bucketTask, task.ID, task.clone())
+ 
+ 	// Extract the archive
+-	extractErr := extractArchive(archivePath, destDir, opts.ArchivePassword, func(extractedFiles int, totalFiles int, progress int) {
++	passwords := candidatePasswords(opts.ArchivePassword, d.archivePasswords())
++	extractErr := extractArchiveWithPasswords(archivePath, destDir, passwords, func(extractedFiles int, totalFiles int, progress int) {
+ 		task.Progress.ExtractProgress = progress
+ 		d.emit(EventKeyProgress, task)
+ 	})
+@@ -1573,7 +1692,8 @@
+ 	d.Logger.Info().Msgf("starting multi-part archive extraction, first part: %s, task id: %s", firstPartPath, task.ID)
+ 
+ 	// Extract the multi-part archive
+-	extractErr := extractMultiPartArchive(firstPartPath, destDir, opts.ArchivePassword, func(extractedFiles int, totalFiles int, progress int) {
++	passwords := candidatePasswords(opts.ArchivePassword, d.archivePasswords())
++	extractErr := extractMultiPartArchiveWithPasswords(firstPartPath, destDir, passwords, func(extractedFiles int, totalFiles int, progress int) {
+ 		task.Progress.ExtractProgress = progress
+ 		d.emit(EventKeyProgress, task)
+ 	})
+@@ -1706,6 +1826,9 @@
+ 	return files
+ }
+ 
++// archiveDeleteDelay is how long an archive stays on disk after a successful extraction
++const archiveDeleteDelay = 5 * time.Second
++
+ // handleExtractionResult handles the result of an extraction operation
+ func (d *Downloader) handleExtractionResult(task *Task, extractErr error, archiveFiles []string, deleteAfterExtract bool) {
+ 	if extractErr != nil {
+@@ -1720,16 +1843,23 @@
+ 		d.emit(EventKeyProgress, task)
+ 		d.storage.Put(bucketTask, task.ID, task.clone())
+ 
+-		// Delete archive files after successful extraction if enabled
++		// Delete archive files after successful extraction if enabled.
++		// The removal is delayed and runs in its own goroutine: the archive
++		// stays around for a few seconds after extraction finishes, and a
++		// slow delete never blocks the single-threaded extraction queue.
+ 		if deleteAfterExtract {
+-			for _, archiveFile := range archiveFiles {
+-				deleteErr := os.Remove(archiveFile)
+-				if deleteErr != nil {
+-					d.Logger.Error().Err(deleteErr).Msgf("delete archive after extraction failed: %s", archiveFile)
+-				} else {
+-					d.Logger.Info().Msgf("archive deleted after extraction: %s", archiveFile)
++			files := append([]string(nil), archiveFiles...)
++			go func() {
++				time.Sleep(archiveDeleteDelay)
++				for _, archiveFile := range files {
++					deleteErr := os.Remove(archiveFile)
++					if deleteErr != nil {
++						d.Logger.Error().Err(deleteErr).Msgf("delete archive after extraction failed: %s", archiveFile)
++					} else {
++						d.Logger.Info().Msgf("archive deleted after extraction: %s", archiveFile)
++					}
+ 				}
+-			}
++			}()
+ 		}
+ 	}
+ }
+diff -urN a/pkg/download/extract_password.go b/pkg/download/extract_password.go
+--- a/pkg/download/extract_password.go	1970-01-01 08:00:00.000000000 +0800
++++ b/pkg/download/extract_password.go	2026-11-11 18:09:40.220436000 +0800
+@@ -0,0 +1,315 @@
++package download
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"io"
++	"os"
++	"path/filepath"
++	"strings"
++	"unicode/utf8"
++
++	"github.com/mholt/archives"
++	yzip "github.com/yeka/zip"
++	"golang.org/x/text/encoding/simplifiedchinese"
++)
++
++// candidatePasswords 合并「任务自带的密码」和「全局密码表」，去掉空串与重复项。
++// 任务自带的密码排在最前面，因为它最可能是对的。
++func candidatePasswords(taskPassword string, list []string) []string {
++	seen := make(map[string]struct{}, len(list)+1)
++	out := make([]string, 0, len(list)+1)
++	add := func(p string) {
++		p = strings.TrimSpace(p)
++		if p == "" {
++			return
++		}
++		if _, ok := seen[p]; ok {
++			return
++		}
++		seen[p] = struct{}{}
++		out = append(out, p)
++	}
++	add(taskPassword)
++	for _, p := range list {
++		add(p)
++	}
++	return out
++}
++
++// isZipPath 只看扩展名判断是不是 zip（含分卷 .zip.001）。
++func isZipPath(p string) bool {
++	lower := strings.ToLower(p)
++	return strings.HasSuffix(lower, ".zip") || strings.HasSuffix(lower, ".zip.001")
++}
++
++// probeZipPassword 只读不写地验证 zip 密码。
++// 解压目标目录往往就是压缩包所在的目录（gopeed 就是这么设计的），
++// 所以绝不能靠「试错了就把目录清掉」来回滚 —— 那会把压缩包本身删了。
++// 验证一遍再真正解压，是一次性、无副作用的做法。
++func probeZipPassword(archivePath, password string) error {
++	r, err := yzip.OpenReader(archivePath)
++	if err != nil {
++		return err
++	}
++	defer r.Close()
++
++	for _, f := range r.File {
++		if f.FileInfo().IsDir() {
++			continue
++		}
++		f.SetPassword(password)
++		rc, err := f.Open()
++		if err != nil {
++			return err
++		}
++		buf := make([]byte, 512)
++		_, readErr := io.ReadFull(rc, buf)
++		rc.Close()
++		// 文件比 512 字节短是正常情况，只有「真的读出错」才算密码不对
++		if readErr != nil && !errors.Is(readErr, io.ErrUnexpectedEOF) && !errors.Is(readErr, io.EOF) {
++			return readErr
++		}
++		return nil
++	}
++	return errors.New("zip 里没有可解压的文件")
++}
++
++// errStopProbe 用来在读通一个文件后提前结束试读，避免为了验密码把整个包解一遍。
++var errStopProbe = errors.New("probe ok")
++
++// readSome 从 r 里读一点内容，用来触发解密/校验；文件比 n 字节短不算错。
++func readSome(r io.Reader, n int) error {
++	buf := make([]byte, n)
++	_, err := io.ReadFull(r, buf)
++	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
++		return err
++	}
++	return nil
++}
++
++// probeArchivePassword 用 mholt/archives 只读不写地验证 rar / 7z 等格式的密码。
++func probeArchivePassword(archivePath, password string) error {
++	info, err := openArchive(archivePath, password)
++	if err != nil {
++		return err
++	}
++	defer info.file.Close()
++
++	// got 表示至少有一个文件被成功读出内容 —— 这说明密码是对的。
++	// 之所以不用 errors.Is 判断「提前结束」的哨兵错误，是因为各解压库可能把
++	// handler 返回的错误包一层，靠哨兵判断会误判成密码错误。
++	got := false
++	handler := func(ctx context.Context, fileInfo archives.FileInfo) error {
++		if fileInfo.IsDir() {
++			return nil
++		}
++		rc, err := fileInfo.Open()
++		if err != nil {
++			return err
++		}
++		defer rc.Close()
++		if err := readSome(rc, 512); err != nil {
++			return err
++		}
++		got = true
++		return errStopProbe
++	}
++
++	switch f := info.format.(type) {
++	case archives.Extractor:
++		err = f.Extract(context.Background(), info.input, handler)
++	case archives.Decompressor:
++		rc, oerr := f.OpenReader(info.input)
++		if oerr != nil {
++			return oerr
++		}
++		defer rc.Close()
++		if rerr := readSome(rc, 512); rerr != nil {
++			return rerr
++		}
++		return nil
++	case archives.Archiver:
++		if ext, ok := f.(archives.Extractor); ok {
++			if seeker, ok := info.input.(io.Seeker); ok {
++				_, _ = seeker.Seek(0, io.SeekStart)
++			}
++			err = ext.Extract(context.Background(),
++				io.NewSectionReader(info.file, 0, info.stat.Size()), handler)
++		}
++	}
++	if got {
++		return nil
++	}
++	return err
++}
++
++func probePassword(archivePath, password string) error {
++	if isZipPath(archivePath) {
++		return probeZipPassword(archivePath, password)
++	}
++	return probeArchivePassword(archivePath, password)
++}
++
++// extractArchiveWithPasswords 先逐个验证密码（只读），命中后再真正解压一次。
++func extractArchiveWithPasswords(archivePath, destDir string, passwords []string, cb ExtractProgressCallback) error {
++	if len(passwords) == 0 {
++		return extractArchive(archivePath, destDir, "", cb)
++	}
++
++	// ZIP 单独处理：标准库（archive/zip）根本没有解密实现，
++	// 所以先看中央目录里的加密标志位，没加密就走原来的路径，
++	// 加密了才退到 yeka/zip 逐个密码试。
++	if isZipPath(archivePath) {
++		encrypted, err := zipIsEncrypted(archivePath)
++		if err != nil || !encrypted {
++			return extractArchive(archivePath, destDir, "", cb)
++		}
++		for _, pw := range passwords {
++			if probeZipPassword(archivePath, pw) == nil {
++				return extractZipWithPassword(archivePath, destDir, pw, cb)
++			}
++		}
++		return fmt.Errorf("密码表里没有能解开这个压缩包的密码（共试了 %d 个）", len(passwords))
++	}
++
++	var last error
++	for _, pw := range passwords {
++		if err := probeArchivePassword(archivePath, pw); err != nil {
++			last = err
++			continue
++		}
++		return extractArchive(archivePath, destDir, pw, cb)
++	}
++	if last == nil {
++		last = errors.New("没有可用的解压密码")
++	}
++	return fmt.Errorf("密码表里没有能解开这个压缩包的密码：%w", last)
++}
++
++// extractMultiPartArchiveWithPasswords 是多卷版本，逻辑同上（只验第一个分卷）。
++func extractMultiPartArchiveWithPasswords(firstPartPath, destDir string, passwords []string, cb ExtractProgressCallback) error {
++	if len(passwords) == 0 {
++		return extractMultiPartArchive(firstPartPath, destDir, "", cb)
++	}
++	var last error
++	for _, pw := range passwords {
++		if err := probePassword(firstPartPath, pw); err != nil {
++			last = err
++			continue
++		}
++		return extractMultiPartArchive(firstPartPath, destDir, pw, cb)
++	}
++	if last == nil {
++		last = errors.New("没有可用的解压密码")
++	}
++	return fmt.Errorf("密码表里没有能解开这个压缩包的密码：%w", last)
++}
++
++// extractZipWithPassword 用 yeka/zip 解带密码的 zip（支持 ZipCrypto 与 AES）。
++func extractZipWithPassword(archivePath, destDir, password string, cb ExtractProgressCallback) error {
++	r, err := yzip.OpenReader(archivePath)
++	if err != nil {
++		return err
++	}
++	defer r.Close()
++
++	if err := os.MkdirAll(destDir, 0o755); err != nil {
++		return err
++	}
++
++	total := 0
++	for _, f := range r.File {
++		if !f.FileInfo().IsDir() {
++			total++
++		}
++	}
++
++	extracted := 0
++	for _, f := range r.File {
++		name := f.Name
++		// zip 里的文件名如果是 GBK（没打 UTF-8 标志），Go 会原样给出非法 UTF-8 字节
++		if !utf8.ValidString(name) {
++			if decoded, derr := simplifiedchinese.GB18030.NewDecoder().String(name); derr == nil {
++				name = decoded
++			}
++		}
++		// 挡住 ../ 这种越界路径
++		clean := filepath.Clean(name)
++		if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
++			continue
++		}
++		dest := filepath.Join(destDir, clean)
++
++		if f.FileInfo().IsDir() {
++			_ = os.MkdirAll(dest, f.Mode())
++			continue
++		}
++		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
++			return err
++		}
++
++		f.SetPassword(password)
++		rc, err := f.Open()
++		if err != nil {
++			return err
++		}
++		out, err := os.Create(dest)
++		if err != nil {
++			rc.Close()
++			return err
++		}
++		_, copyErr := io.Copy(out, rc)
++		closeErr := out.Close()
++		rc.Close()
++		if copyErr != nil {
++			return copyErr
++		}
++		if closeErr != nil {
++			return closeErr
++		}
++		_ = os.Chmod(dest, f.Mode())
++
++		extracted++
++		if cb != nil && total > 0 {
++			progress := extracted * 100 / total
++			if progress > 100 {
++				progress = 100
++			}
++			cb(extracted, total, progress)
++		}
++	}
++	if extracted == 0 {
++		return errors.New("zip 里没有可解压的文件")
++	}
++	return nil
++}
++
++// archivePasswords 取全局的「自动解压密码表」，配置缺字段时返回空。
++func (d *Downloader) archivePasswords() []string {
++	if d.cfg == nil || d.cfg.DownloaderStoreConfig == nil {
++		return nil
++	}
++	if d.cfg.DownloaderStoreConfig.Archive == nil {
++		return nil
++	}
++	return d.cfg.DownloaderStoreConfig.Archive.Passwords
++}
++
++// zipIsEncrypted 看中央目录里的加密标志位，判断这个 zip 是否加密。
++// 比「试着解一遍看失不失败」可靠：未加密的 zip 也能正常走原来的解压路径
++// （保留 GB18030 文件名处理），不会因为多传了个密码就被当成要解密。
++func zipIsEncrypted(archivePath string) (bool, error) {
++	r, err := yzip.OpenReader(archivePath)
++	if err != nil {
++		return false, err
++	}
++	defer r.Close()
++	for _, f := range r.File {
++		if !f.FileInfo().IsDir() && f.IsEncrypted() {
++			return true, nil
++		}
++	}
++	return false, nil
++}
+\ No newline at end of file
