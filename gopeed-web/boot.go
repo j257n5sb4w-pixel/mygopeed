@@ -15,7 +15,7 @@ func hideBoot() {
 	}
 }
 
-// pageOrigin 返回页面自身的来源（如 http://<your-server-ip>:8090）。
+// pageOrigin 返回页面自身的来源（如 http://192.0.2.10:8090）。
 // 部署时由同一台机器反代 /api，所以默认就跟页面同源。
 func pageOrigin() string {
 	loc := js.Global().Get("location")

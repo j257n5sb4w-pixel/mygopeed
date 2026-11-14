@@ -8,7 +8,6 @@ import (
 	"github.com/GopeedLab/gopeed/internal/controller"
 	"github.com/GopeedLab/gopeed/internal/fetcher"
 	"github.com/GopeedLab/gopeed/internal/protocol/bt"
-	"github.com/GopeedLab/gopeed/internal/protocol/ed2k"
 	"github.com/GopeedLab/gopeed/internal/protocol/http"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	"github.com/GopeedLab/gopeed/pkg/util"
@@ -167,7 +166,6 @@ func (cfg *DownloaderConfig) Init() *DownloaderConfig {
 		cfg.FetchManagers = []fetcher.FetcherManager{
 			new(http.FetcherManager),
 			new(bt.FetcherManager),
-			new(ed2k.FetcherManager),
 		}
 	}
 	if cfg.RefreshInterval == 0 {

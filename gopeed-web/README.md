@@ -3,7 +3,7 @@
 用 [MyGo](https://mygo.egoist.dev) 的**原生 Go UI** 写的 Gopeed 客户端，编译成 WebAssembly，
 浏览器直接打开 IP 就能用。界面由 Go 绘制（WebGL2 canvas），没有 HTML 前端框架。
 
-**访问地址：<http://<your-server-ip>:8090/>**
+**访问地址：<http://192.0.2.10:8090/>**
 
 ---
 
@@ -30,8 +30,8 @@ Caddy :8090 ──/api/*──▶ 反向代理 ──▶ gopeed 127.0.0.1:9999
 | --- | --- |
 | 顶栏 | 连接状态圆点（已连接 / 连接失败）、总速度、任务计数 |
 | 工具条 | ＋新建任务、全部 / 下载中 / 已完成 分段筛选、全部暂停、全部继续、刷新、搜索框、设置 |
-| 任务卡 | 协议徽章（HTTP / BT / ED2K）、名称、状态、进度条、已下/总大小、↓ 速度、↑ 速度、节点数、连接数、保存路径、详情、暂停/继续、删除 |
-| 任务详情 | 点「详情」弹出，见下节；BT / HTTP / ED2K 各显示自己那几项 |
+| 任务卡 | 协议徽章（HTTP / BT）、名称、状态、进度条、已下/总大小、↓ 速度、↑ 速度、节点数、连接数、保存路径、详情、暂停/继续、删除 |
+| 任务详情 | 点「详情」弹出，见下节；BT / HTTP 各显示自己那几项 |
 | 新建下载 | 多行链接批量添加、保存路径、解析后可勾选文件 |
 | 设置 | 7 个分页，覆盖 gopeed 全部配置项，见下节 |
 | 删除 | 弹确认框，可勾选「同时删除已下载的本地文件」 |
@@ -39,7 +39,7 @@ Caddy :8090 ──/api/*──▶ 反向代理 ──▶ gopeed 127.0.0.1:9999
 
 数据每 1.5 秒自动刷新；只在任务处于 `running` / `wait` 时才补拉 `/stats`，避免无谓请求。
 
-支持的协议：`http/https`、`bt`（磁力链 / `.torrent` URL / base64）、`ed2k`。
+支持的协议：`http/https`、`bt`（磁力链 / `.torrent` URL / base64）。ed2k 已从本机二进制里移除。
 `ftp` / `sftp` / `thunder` 会被服务端拒绝（`unsupported protocol`）。
 
 ## 任务详情
@@ -52,7 +52,6 @@ meta，列表接口不带 `createdAt`）和 `GET /api/v1/tasks/{id}/stats`（实
 | 全部 | 状态、进度（已下/总大小 + 百分比）、大小、已下载、↓/↑ 速度、保存路径、创建时间、任务 ID、来源 |
 | `bt` | InfoHash（40 位）、节点（在线/总）、分享率 |
 | `http` | 是否支持断点续传、连接数、完整下载地址 |
-| `ed2k` | 文件 hash（InfoHash 行）、源数 |
 
 「来源」对 BT 只显示「种子文件（内嵌 base64）」——`meta.req.url` 是几 KB 的
 data URI，原样铺出来没法看。文件列表超过 200 条只列前 200 条。
@@ -84,9 +83,13 @@ data URI，原样铺出来没法看。文件列表超过 200 条只列前 200 �
 | BT | 做种时长（秒） | `protocolConfig.bt.seedTime` |
 | BT | 一直做种不自动停 | `protocolConfig.bt.seedKeep` |
 | BT | Tracker 列表（一行一个） | `protocolConfig.bt.trackers` |
-| ED2K | eD2k 监听端口 / Kad UDP 端口 | `protocolConfig.ed2k.listenPort` / `udpPort` |
-| ED2K | 服务器地址 / server.met / nodes.dat | `protocolConfig.ed2k.serverAddr` / `serverMet` / `nodesDat` |
-| 代理 | 启用 / 用系统代理 / 类型 / 地址 / 用户名 / 密码 | `proxy.enable` / `system` / `scheme` / `host` / `usr` / `pwd` |
+| BT | 做种自动清理任务 | `seedAutoRemove.enable`（本机补丁字段） |
+| BT | 目标分享率 | `seedAutoRemove.ratio`，0 = 不按分享率判断 |
+| BT | 无上传清理（分钟） | `seedAutoRemove.idleMinutes`，0 = 不看空闲；后台每 10 分钟扫一次 |
+| BT | 重启后自动续传 | `resumeOnStart`（默认 true） |
+| HTTP | 全部下载经代理 | `proxy.mode=all`（本机补丁字段，旧配置看 `proxy.enable`） |
+| HTTP | 部分下载经代理 + 关键字列表 | `proxy.mode=partial` + `proxy.keywords[]`（一行一个，网址子串匹配，不区分大小写） |
+| HTTP | 用系统环境变量里的代理 / 类型 / 地址 / 用户名 / 密码 | `proxy.system` / `scheme` / `host` / `usr` / `pwd` |
 | 通知 | Webhook 开关 + 地址列表 | `webhook.enable` / `urls` |
 | 通知 | 脚本开关 + 路径列表 | `script.enable` / `paths` |
 | 连接 | 服务器地址、API Token | 只存浏览器 `localStorage`，不上传服务器 |
@@ -102,7 +105,7 @@ data URI，原样铺出来没法看。文件列表超过 200 条只列前 200 �
 ## 目录结构
 
 ```
-D:\DSH\_mygo\gopeed-web\
+gopeed-web/
 ├── main.go        状态机、视图（header/toolbar/body/row）、弹窗、轮询
 ├── client.go      gopeed REST 客户端（同构结构体 + 请求封装）
 ├── boot.go        js/wasm 专用：隐藏加载遮罩、localStorage、页面 origin
@@ -119,11 +122,11 @@ D:\DSH\_mygo\gopeed-web\
 必须用 **pwsh**（bash 下 Go 会因命名管道受限失败），并且重设 `TMP`/`TEMP`：
 
 ```powershell
-cd D:\DSH\_mygo\gopeed-web
-$env:Path = "D:\DSH\.tools\go1.27.3\go\bin;" + $env:Path
-$env:GOPATH = "D:\DSH\_work\gopath"; $env:GOCACHE = "D:\DSH\_work\gocache"
+cd gopeed-web
+$env:Path = "<go-bin>;" + $env:Path
+$env:GOPATH = "<gopath>"; $env:GOCACHE = "<gocache>"
 $env:GOPROXY = "https://goproxy.cn,direct"; $env:GOSUMDB = "off"; $env:GOFLAGS = "-mod=mod"
-$env:TMP = "D:\DSH\_work\tmp"; $env:TEMP = "D:\DSH\_work\tmp"
+$env:TMP = "<tmp>"; $env:TEMP = "<tmp>"
 $env:GOOS = "js"; $env:GOARCH = "wasm"
 
 go vet ./...
@@ -174,7 +177,7 @@ Caddy 配置要点：
 - **不勾选**「同时删除已下载的本地文件」→ 只删任务记录，磁盘上的文件保留（`DELETE /tasks/{id}`）。
 - **勾选** → 连文件一起删（`DELETE /tasks/{id}?force=true`），勾上后文案变红、按钮变红并改成「删除任务和文件」。
 
-「下载后重命名」现在由 gopeed 服务端自己完成（详见 `_mygo/gopeed-patched/README.md`）：
+「下载后重命名」现在由 gopeed 服务端自己完成（详见 `gopeed-patched/README.md`）：
 改名成功后它会把任务记录里的名字一起改掉，所以 `force=true` 删到的就是改名后那份文件，
 **面板不需要再额外补删一次**（以前要调 `gopeed-push` 的 `/cleanup`，那个网关已经拆了）。
 
@@ -241,7 +244,7 @@ anime-go
 
 以前这里是个独立的 `gopeed-push` 网关（8091 端口），因为 gopeed 缺三件事：
 下载完成后改名、按映射表改写目录、删任务时删到改名后的文件。这三件事现在都做进了
-gopeed 本体（补丁与说明见 `_mygo/gopeed-patched/README.md`），网关已拆除，**8091 端口不再监听**。
+gopeed 本体（补丁与说明见 `gopeed-patched/README.md`），网关已拆除，**8091 端口不再监听**。
 
 调用方直接打 gopeed 的 REST 就行，认证用 `X-Api-Token: <your-gopeed-api-token>`：
 
@@ -324,9 +327,9 @@ curl -X DELETE "http://127.0.0.1:9999/api/v1/tasks/<任务ID>?force=true"   -H '
 - 页面加载：canvas 1366×803，无 JS 异常，加载遮罩正常消失
 - 空态、任务卡渲染、进度条、速度、节点数、路径
 - ＋新建任务 → 填链接 + 路径 → 开始下载 → 卡片出现 → 完成，toast「已添加 1 个任务」
-- 设置弹窗回填（服务器地址 `http://<your-server-ip>:8090`、最大并发 5、两个开关）
+- 设置弹窗回填（服务器地址 `http://192.0.2.10:8090`、最大并发 5、两个开关）
 - 搜索过滤（无匹配时显示「没有符合条件的任务」）
 - 分段筛选、全部暂停 / 全部继续、删除
-- HTTP / BT / ed2k 三种任务都能建，`ftp://` 正确报 `unsupported protocol`
+- HTTP / BT 两种任务都能建，`ed2k://` 与 `ftp://` 正确报 `unsupported protocol`
 
 部署后清理：远端任务数 0，`downloadDir=''`、`maxRunning=5`、`autoTorrent=false`、`autoExtract=false`，`/tmp` 无残留。

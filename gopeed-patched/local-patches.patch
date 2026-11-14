@@ -1,6 +1,28 @@
-diff -urN a/internal/protocol/bt/fetcher.go b/internal/protocol/bt/fetcher.go
---- a/internal/protocol/bt/fetcher.go	2026-11-11 18:09:40.152200000 +0800
-+++ b/internal/protocol/bt/fetcher.go	2026-11-11 18:09:40.204432500 +0800
+--- a/go.mod
++++ b/go.mod
+@@ -17,7 +17,6 @@
+ 	github.com/matoous/go-nanoid/v2 v2.0.0
+ 	github.com/mattn/go-ieproxy v0.0.12
+ 	github.com/mholt/archives v0.1.5
+-	github.com/monkeyWie/goed2k v0.0.0-20260317100435-7a7575cf2447
+ 	github.com/pkg/errors v0.9.1
+ 	github.com/rs/dnscache v0.0.0-20230804202142-fc85eb664529
+ 	github.com/rs/zerolog v1.31.0
+--- a/go.sum
++++ b/go.sum
+@@ -386,10 +386,6 @@
+ github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd/go.mod h1:6dJC0mAP4ikYIbvyc7fijjWJddQyLn8Ig3JB5CqoB9Q=
+ github.com/modern-go/reflect2 v0.0.0-20180701023420-4b7aa43c6742/go.mod h1:bx2lNnkwVCuqBIxFjflWJWanXIb3RllmbCylyMrvgv0=
+ github.com/modern-go/reflect2 v1.0.1/go.mod h1:bx2lNnkwVCuqBIxFjflWJWanXIb3RllmbCylyMrvgv0=
+-github.com/monkeyWie/goed2k v0.0.0-20260317094144-6e18d43056e5 h1:tEOucyKJzFsCz5Gr41jFHj8i2g1zemTyS4uyErJgFHc=
+-github.com/monkeyWie/goed2k v0.0.0-20260317094144-6e18d43056e5/go.mod h1:Ry2y1QlzerUgA1hVmExBdXXzE4Sjk1M7w0nSh6dhDOg=
+-github.com/monkeyWie/goed2k v0.0.0-20260317100435-7a7575cf2447 h1:88kRsNwkDKPA4NzRUWdOoIL7SyMNDwtmAxzShKBvKTI=
+-github.com/monkeyWie/goed2k v0.0.0-20260317100435-7a7575cf2447/go.mod h1:Ry2y1QlzerUgA1hVmExBdXXzE4Sjk1M7w0nSh6dhDOg=
+ github.com/mr-tron/base58 v1.2.0 h1:T/HDJBh4ZCPbU39/+c3rRvE0uKBQlU27+QI8LJ4t64o=
+ github.com/mr-tron/base58 v1.2.0/go.mod h1:BinMc/sQntlIE1frQmRFPUoPA1Zkr8VRgBdjWI2mNwc=
+ github.com/mschoch/smat v0.0.0-20160514031455-90eadee771ae/go.mod h1:qAyveg+e4CE+eKJXWVjKXM4ck2QobLqTDytGJbLLhJg=
+--- a/internal/protocol/bt/fetcher.go
++++ b/internal/protocol/bt/fetcher.go
 @@ -142,13 +142,42 @@
  func (f *Fetcher) Close() (err error) {
  	f.safeDrop()
@@ -46,9 +68,579 @@ diff -urN a/internal/protocol/bt/fetcher.go b/internal/protocol/bt/fetcher.go
  func (f *Fetcher) safeDrop() {
  	defer func() {
  		// ignore panic
-diff -urN a/pkg/base/model.go b/pkg/base/model.go
---- a/pkg/base/model.go	2026-11-11 18:09:40.112688000 +0800
-+++ b/pkg/base/model.go	2026-11-11 18:09:40.169705300 +0800
+--- a/internal/protocol/ed2k/config.go
++++ /dev/null
+@@ -1,15 +0,0 @@
+-package ed2k
+-
+-const (
+-	defaultServerList = "45.82.80.155:5687,176.123.5.89:4725,85.121.5.137:4232,176.123.2.239:4232,145.239.2.134:4661,91.208.162.87:4232,37.15.61.236:4232"
+-	defaultServerMet  = "ed2k://|serverlist|http://upd.emule-security.org/server.met|/"
+-	defaultNodesDat   = "https://upd.emule-security.org/nodes.dat"
+-)
+-
+-type config struct {
+-	ListenPort int    `json:"listenPort"`
+-	UDPPort    int    `json:"udpPort"`
+-	ServerAddr string `json:"serverAddr"`
+-	ServerMet  string `json:"serverMet"`
+-	NodesDat   string `json:"nodesDat"`
+-}
+--- a/internal/protocol/ed2k/fetcher.go
++++ /dev/null
+@@ -1,505 +0,0 @@
+-package ed2k
+-
+-import (
+-	"context"
+-	"errors"
+-	"os"
+-	"path/filepath"
+-	"strings"
+-	"sync"
+-	"time"
+-
+-	"github.com/GopeedLab/gopeed/internal/controller"
+-	"github.com/GopeedLab/gopeed/internal/fetcher"
+-	"github.com/GopeedLab/gopeed/pkg/base"
+-	ped2k "github.com/GopeedLab/gopeed/pkg/protocol/ed2k"
+-	"github.com/monkeyWie/goed2k"
+-	gprotocol "github.com/monkeyWie/goed2k/protocol"
+-)
+-
+-type clientStateStore struct {
+-	store fetcher.ProtocolStateStore
+-}
+-
+-func (s *clientStateStore) Load() (*goed2k.ClientState, error) {
+-	if s == nil || s.store == nil {
+-		return nil, nil
+-	}
+-	var state goed2k.ClientState
+-	exist, err := s.store.Load(&state)
+-	if err != nil {
+-		return nil, err
+-	}
+-	if !exist {
+-		return nil, nil
+-	}
+-	return &state, nil
+-}
+-
+-func (s *clientStateStore) Save(state *goed2k.ClientState) error {
+-	if s == nil || s.store == nil {
+-		return nil
+-	}
+-	if state == nil {
+-		return s.store.Delete()
+-	}
+-	return s.store.Save(state)
+-}
+-
+-type Fetcher struct {
+-	ctl    *controller.Controller
+-	config *config
+-
+-	manager *FetcherManager
+-	meta    *fetcher.FetcherMeta
+-	handle  goed2k.TransferHandle
+-
+-	waitCtx    context.Context
+-	waitCancel context.CancelFunc
+-}
+-
+-func (f *Fetcher) Setup(ctl *controller.Controller) {
+-	f.ctl = ctl
+-	if f.meta == nil {
+-		f.meta = &fetcher.FetcherMeta{}
+-	}
+-	f.waitCtx, f.waitCancel = context.WithCancel(context.Background())
+-	f.ctl.GetConfig(&f.config)
+-}
+-
+-func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) error {
+-	link, err := parseLink(req.URL)
+-	if err != nil {
+-		return err
+-	}
+-
+-	f.meta.Req = req
+-	f.meta.Opts = opts
+-	if f.meta.Opts == nil {
+-		f.meta.Opts = &base.Options{}
+-	}
+-	f.meta.Res = buildResource(link)
+-	return nil
+-}
+-
+-func (f *Fetcher) Start() error {
+-	link, err := parseLink(f.meta.Req.URL)
+-	if err != nil {
+-		return err
+-	}
+-	if f.meta.Res == nil {
+-		f.meta.Res = buildResource(link)
+-	}
+-
+-	client, err := f.getClient()
+-	if err != nil {
+-		return err
+-	}
+-
+-	targetPath := f.meta.SingleFilepath()
+-	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+-		return err
+-	}
+-
+-	handle := client.FindTransfer(link.Hash)
+-	if handle.IsValid() {
+-		f.handle = handle
+-		if handle.IsPaused() {
+-			if err := client.ResumeTransfer(handle.GetHash()); err != nil {
+-				return err
+-			}
+-		}
+-		return nil
+-	}
+-
+-	atp := goed2k.AddTransferParams{
+-		Hash:       link.Hash,
+-		CreateTime: time.Now().UnixMilli(),
+-		Size:       link.NumberValue,
+-		FilePath:   targetPath,
+-	}
+-	handle, err = client.AddTransfer(atp)
+-	if err != nil {
+-		return err
+-	}
+-	f.handle = handle
+-	if handle.IsValid() && handle.IsPaused() {
+-		if err := client.ResumeTransfer(handle.GetHash()); err != nil {
+-			return err
+-		}
+-	}
+-	return nil
+-}
+-
+-func (f *Fetcher) Patch(req *base.Request, opts *base.Options) error {
+-	handle := f.currentHandle()
+-
+-	if opts != nil && (opts.Name != "" || opts.Path != "") && handle.IsValid() {
+-		return errors.New("cannot change ed2k target path after transfer started")
+-	}
+-	if req != nil && req.URL != "" && handle.IsValid() {
+-		return errors.New("cannot change ed2k link after transfer started")
+-	}
+-
+-	if req != nil {
+-		if req.URL != "" {
+-			link, err := parseLink(req.URL)
+-			if err != nil {
+-				return err
+-			}
+-			f.meta.Req.URL = req.URL
+-			f.meta.Res = buildResource(link)
+-		}
+-		if req.Labels != nil {
+-			if f.meta.Req.Labels == nil {
+-				f.meta.Req.Labels = make(map[string]string)
+-			}
+-			for k, v := range req.Labels {
+-				f.meta.Req.Labels[k] = v
+-			}
+-		}
+-		if req.Proxy != nil {
+-			f.meta.Req.Proxy = req.Proxy
+-		}
+-	}
+-
+-	if opts != nil {
+-		if opts.Name != "" {
+-			f.meta.Opts.Name = opts.Name
+-		}
+-		if opts.Path != "" {
+-			f.meta.Opts.Path = opts.Path
+-		}
+-	}
+-	return nil
+-}
+-
+-func (f *Fetcher) Pause() error {
+-	handle := f.currentHandle()
+-	if !handle.IsValid() {
+-		return nil
+-	}
+-	client, err := f.getClient()
+-	if err != nil {
+-		return err
+-	}
+-	if err := client.PauseTransfer(handle.GetHash()); err != nil {
+-		return err
+-	}
+-	f.handle = handle
+-	return nil
+-}
+-
+-func (f *Fetcher) Close() error {
+-	if f.waitCancel != nil {
+-		f.waitCancel()
+-	}
+-	handle := f.currentHandle()
+-	if !handle.IsValid() {
+-		return nil
+-	}
+-	client, err := f.getClient()
+-	if err != nil {
+-		return err
+-	}
+-	f.handle = handle
+-	return client.RemoveTransfer(handle.GetHash(), false)
+-}
+-
+-func (f *Fetcher) Meta() *fetcher.FetcherMeta {
+-	return f.meta
+-}
+-
+-func (f *Fetcher) Stats() any {
+-	handle := f.currentHandle()
+-	if !handle.IsValid() {
+-		return &ped2k.Stats{}
+-	}
+-	status := handle.GetStatus()
+-	return &ped2k.Stats{
+-		State:         string(status.State),
+-		ActivePeers:   handle.ActiveConnections(),
+-		TotalPeers:    status.NumPeers,
+-		DownloadRate:  status.DownloadRate,
+-		Upload:        status.Upload,
+-		UploadRate:    status.UploadRate,
+-		TotalDone:     status.TotalDone,
+-		TotalReceived: status.TotalReceived,
+-		TotalWanted:   status.TotalWanted,
+-	}
+-}
+-
+-func (f *Fetcher) Progress() fetcher.Progress {
+-	handle := f.currentHandle()
+-	if !handle.IsValid() {
+-		return fetcher.Progress{0}
+-	}
+-	return fetcher.Progress{handle.GetStatus().TotalReceived}
+-}
+-
+-func (f *Fetcher) Wait() error {
+-	client, err := f.getClient()
+-	if err != nil {
+-		return err
+-	}
+-
+-	hash, err := f.hash()
+-	if err != nil {
+-		return err
+-	}
+-
+-	handle := f.currentHandle()
+-	if handle.IsValid() && handle.IsFinished() {
+-		return nil
+-	}
+-
+-	progressCh, cancel := client.SubscribeTransferProgress()
+-	defer cancel()
+-
+-	for {
+-		select {
+-		case <-f.waitCtx.Done():
+-			return nil
+-		case event, ok := <-progressCh:
+-			if !ok {
+-				return nil
+-			}
+-			for _, transfer := range event.Transfers {
+-				if transfer.Hash.Compare(hash) != 0 {
+-					continue
+-				}
+-				// Removal can happen during task deletion or client shutdown, both of
+-				// which should unblock Wait without treating it as a download failure.
+-				if transfer.Removed || transfer.State == goed2k.Finished {
+-					return nil
+-				}
+-			}
+-		}
+-	}
+-}
+-
+-func (f *Fetcher) getClient() (*goed2k.Client, error) {
+-	if f.manager == nil {
+-		f.manager = &FetcherManager{}
+-	}
+-	return f.manager.initClient(f.config)
+-}
+-
+-func (f *Fetcher) currentHandle() goed2k.TransferHandle {
+-	if f.handle.IsValid() {
+-		return f.handle
+-	}
+-	if f.manager == nil {
+-		return f.handle
+-	}
+-	client := f.manager.currentClient()
+-	if client == nil {
+-		return f.handle
+-	}
+-	hash, err := f.hash()
+-	if err != nil {
+-		return f.handle
+-	}
+-	handle := client.FindTransfer(hash)
+-	if handle.IsValid() {
+-		f.handle = handle
+-	}
+-	return f.handle
+-}
+-
+-func (f *Fetcher) hash() (gprotocol.Hash, error) {
+-	if f.meta == nil || f.meta.Req == nil {
+-		return gprotocol.Invalid, errors.New("ed2k link is empty")
+-	}
+-	link, err := parseLink(f.meta.Req.URL)
+-	if err != nil {
+-		return gprotocol.Invalid, err
+-	}
+-	return link.Hash, nil
+-}
+-
+-type FetcherManager struct {
+-	mu         sync.Mutex
+-	client     *goed2k.Client
+-	stateStore *clientStateStore
+-}
+-
+-func (fm *FetcherManager) SetStateStore(store fetcher.ProtocolStateStore) {
+-	fm.mu.Lock()
+-	defer fm.mu.Unlock()
+-
+-	if fm.stateStore == nil {
+-		fm.stateStore = &clientStateStore{}
+-	}
+-	fm.stateStore.store = store
+-	if fm.client != nil {
+-		fm.client.SetStateStore(fm.stateStore)
+-	}
+-}
+-
+-func (fm *FetcherManager) Name() string {
+-	return "ed2k"
+-}
+-
+-func (fm *FetcherManager) Filters() []*fetcher.SchemeFilter {
+-	return []*fetcher.SchemeFilter{
+-		{
+-			Type:    fetcher.FilterTypeUrl,
+-			Pattern: "ED2K",
+-		},
+-	}
+-}
+-
+-func (fm *FetcherManager) Build() fetcher.Fetcher {
+-	return &Fetcher{manager: fm}
+-}
+-
+-func (fm *FetcherManager) ParseName(u string) string {
+-	link, err := parseLink(u)
+-	if err != nil {
+-		return ""
+-	}
+-	return link.StringValue
+-}
+-
+-func (fm *FetcherManager) AutoRename() bool {
+-	return true
+-}
+-
+-func (fm *FetcherManager) DefaultConfig() any {
+-	return &config{
+-		ListenPort: 0,
+-		UDPPort:    0,
+-		ServerAddr: defaultServerList,
+-		ServerMet:  defaultServerMet,
+-		NodesDat:   defaultNodesDat,
+-	}
+-}
+-
+-func (fm *FetcherManager) Store(f fetcher.Fetcher) (any, error) {
+-	return nil, nil
+-}
+-
+-func (fm *FetcherManager) Restore() (v any, f func(meta *fetcher.FetcherMeta, v any) fetcher.Fetcher) {
+-	return nil, func(meta *fetcher.FetcherMeta, v any) fetcher.Fetcher {
+-		return &Fetcher{
+-			manager: fm,
+-			meta:    meta,
+-		}
+-	}
+-}
+-
+-func (fm *FetcherManager) Close() error {
+-	fm.mu.Lock()
+-	defer fm.mu.Unlock()
+-
+-	if fm.client != nil {
+-		fm.client.Close()
+-		fm.client = nil
+-	}
+-	return nil
+-}
+-
+-func parseLink(raw string) (goed2k.EMuleLink, error) {
+-	link, err := goed2k.ParseEMuleLink(raw)
+-	if err != nil {
+-		return goed2k.EMuleLink{}, err
+-	}
+-	if link.Type != goed2k.LinkFile {
+-		return goed2k.EMuleLink{}, errors.New("unsupported ed2k link type")
+-	}
+-	return link, nil
+-}
+-
+-func buildResource(link goed2k.EMuleLink) *base.Resource {
+-	return &base.Resource{
+-		Size:  link.NumberValue,
+-		Range: false,
+-		Hash:  link.Hash.String(),
+-		Files: []*base.FileInfo{
+-			{
+-				Name: link.StringValue,
+-				Size: link.NumberValue,
+-			},
+-		},
+-	}
+-}
+-
+-func splitCommaList(value string) []string {
+-	if strings.TrimSpace(value) == "" {
+-		return nil
+-	}
+-	parts := strings.Split(value, ",")
+-	out := make([]string, 0, len(parts))
+-	for _, part := range parts {
+-		part = strings.TrimSpace(part)
+-		if part != "" {
+-			out = append(out, part)
+-		}
+-	}
+-	return out
+-}
+-
+-func (fm *FetcherManager) getStateStoreLocked() *clientStateStore {
+-	if fm.stateStore == nil {
+-		fm.stateStore = &clientStateStore{}
+-	}
+-	return fm.stateStore
+-}
+-
+-func (fm *FetcherManager) currentClient() *goed2k.Client {
+-	fm.mu.Lock()
+-	defer fm.mu.Unlock()
+-	return fm.client
+-}
+-
+-func (fm *FetcherManager) initClient(cfg *config) (*goed2k.Client, error) {
+-	fm.mu.Lock()
+-	defer fm.mu.Unlock()
+-
+-	if fm.client != nil {
+-		return fm.client, nil
+-	}
+-	if cfg == nil {
+-		cfg = fm.DefaultConfig().(*config)
+-	}
+-
+-	settings := goed2k.NewSettings()
+-	settings.ListenPort = cfg.ListenPort
+-	settings.UDPPort = cfg.UDPPort
+-	settings.EnableDHT = true
+-	settings.EnableUPnP = true
+-	settings.ReconnectToServer = true
+-
+-	client := goed2k.NewClient(settings)
+-	client.SetStateStore(fm.getStateStoreLocked())
+-	if err := client.LoadState(""); err != nil {
+-		return nil, err
+-	}
+-	if err := client.Start(); err != nil {
+-		return nil, err
+-	}
+-	fm.client = client
+-	// Bootstrap is best-effort: downloads can still proceed later even if
+-	// server list or DHT initialization fails during startup.
+-	bootstrapClient(client, cfg)
+-	return fm.client, nil
+-}
+-
+-func bootstrapClient(client *goed2k.Client, cfg *config) {
+-	for _, serverAddr := range splitCommaList(cfg.ServerAddr) {
+-		go func(serverAddr string) {
+-			_ = client.Connect(serverAddr)
+-		}(serverAddr)
+-	}
+-	for _, source := range splitCommaList(cfg.ServerMet) {
+-		go func(source string) {
+-			_ = client.ConnectServerMet(source)
+-		}(source)
+-	}
+-	if cfg.NodesDat != "" {
+-		go func() {
+-			_ = client.LoadDHTNodesDat(cfg.NodesDat)
+-		}()
+-	}
+-}
+--- a/internal/protocol/ed2k/fetcher_test.go
++++ /dev/null
+@@ -1,42 +0,0 @@
+-package ed2k
+-
+-import (
+-	"testing"
+-
+-	"github.com/GopeedLab/gopeed/internal/controller"
+-	"github.com/GopeedLab/gopeed/pkg/base"
+-)
+-
+-const testLink = "ed2k://|file|cn_windows_10_multi-edition_vl_version_1709_updated_sept_2017_x64_dvd_100090774.iso|4630972416|8867C5E54405FF9452225B66EFEE690A|/"
+-
+-func TestFetcher_Resolve(t *testing.T) {
+-	f := (&FetcherManager{}).Build()
+-	f.Setup(controller.NewController())
+-
+-	err := f.Resolve(&base.Request{URL: testLink}, &base.Options{Path: t.TempDir()})
+-	if err != nil {
+-		t.Fatalf("Resolve() error = %v", err)
+-	}
+-
+-	meta := f.Meta()
+-	if meta.Res == nil {
+-		t.Fatal("Resolve() resource is nil")
+-	}
+-	if got, want := meta.Res.Hash, "8867C5E54405FF9452225B66EFEE690A"; got != want {
+-		t.Fatalf("Resolve() hash = %s, want %s", got, want)
+-	}
+-	if got, want := meta.Res.Size, int64(4630972416); got != want {
+-		t.Fatalf("Resolve() size = %d, want %d", got, want)
+-	}
+-	if got, want := meta.Res.Files[0].Name, "cn_windows_10_multi-edition_vl_version_1709_updated_sept_2017_x64_dvd_100090774.iso"; got != want {
+-		t.Fatalf("Resolve() name = %q, want %q", got, want)
+-	}
+-}
+-
+-func TestFetcherManager_ParseName(t *testing.T) {
+-	got := (&FetcherManager{}).ParseName(testLink)
+-	want := "cn_windows_10_multi-edition_vl_version_1709_updated_sept_2017_x64_dvd_100090774.iso"
+-	if got != want {
+-		t.Fatalf("ParseName() = %q, want %q", got, want)
+-	}
+-}
+--- a/pkg/base/model.go
++++ b/pkg/base/model.go
 @@ -4,6 +4,8 @@
  	"fmt"
  	"net/http"
@@ -72,11 +664,27 @@ diff -urN a/pkg/base/model.go b/pkg/base/model.go
  }
  
  func (o *Options) InitSelectFiles(fileSize int) {
-@@ -188,6 +197,19 @@
+@@ -188,6 +197,35 @@
  	AutoTorrent                *AutoTorrentConfig     `json:"autoTorrent"`                // AutoTorrent is the auto torrent task creation configuration
  	Archive                    *ArchiveConfig         `json:"archive"`                    // Archive is the archive extraction configuration
  	AutoDeleteMissingFileTasks bool                   `json:"autoDeleteMissingFileTasks"` // AutoDeleteMissingFileTasks enables automatic deletion of tasks with missing files
 +	PathMappings               []PathMapping          `json:"pathMappings"`               // PathMappings rewrites incoming download directories to real on-disk directories
++	SeedAutoRemove             *SeedAutoRemoveConfig  `json:"seedAutoRemove"`             // SeedAutoRemove drops finished BT tasks that have seeded enough
++	ResumeOnStart              *bool                  `json:"resumeOnStart"`              // ResumeOnStart continues unfinished tasks after a restart
++}
++
++// SeedAutoRemoveConfig drops a finished BT task from the list once it has
++// seeded enough. The task record is removed with force=false, so the
++// downloaded files stay on disk. Ratio and IdleMinutes are independent
++// conditions; 0 disables that condition, and Enable=false disables both.
++type SeedAutoRemoveConfig struct {
++	// Enable turns the whole feature on.
++	Enable bool `json:"enable"`
++	// Ratio removes the task once uploaded/downloaded reaches this value.
++	Ratio float64 `json:"ratio"`
++	// IdleMinutes removes the task after this many minutes without any new
++	// uploaded bytes, i.e. nobody is downloading from us any more.
++	IdleMinutes int64 `json:"idleMinutes"`
 +}
 +
 +// PathMapping rewrites a download directory prefix.
@@ -92,12 +700,40 @@ diff -urN a/pkg/base/model.go b/pkg/base/model.go
  }
  
  func (cfg *DownloaderStoreConfig) Init() *DownloaderStoreConfig {
-@@ -218,9 +240,49 @@
+@@ -200,6 +238,18 @@
+ 	if cfg.Proxy == nil {
+ 		cfg.Proxy = &DownloaderProxyConfig{}
+ 	}
++	// Normalise the proxy mode: old configs only had Enable, new ones have a
++	// three-way Mode. Keep both in sync so the panel and the JSON stay sane.
++	if cfg.Proxy.EffectiveMode() == ProxyModeOff {
++		cfg.Proxy.Mode = ProxyModeOff
++		cfg.Proxy.Enable = false
++	} else {
++		cfg.Proxy.Mode = cfg.Proxy.EffectiveMode()
++		cfg.Proxy.Enable = true
++	}
++	if cfg.Proxy.Keywords == nil {
++		cfg.Proxy.Keywords = []string{}
++	}
+ 	if cfg.Webhook == nil {
+ 		cfg.Webhook = &WebhookConfig{}
+ 	}
+@@ -218,9 +268,58 @@
  			DeleteAfterExtract: false,
  		}
  	}
 +	if cfg.PathMappings == nil {
 +		cfg.PathMappings = []PathMapping{}
++	}
++	if cfg.SeedAutoRemove == nil {
++		cfg.SeedAutoRemove = &SeedAutoRemoveConfig{}
++	}
++	if cfg.ResumeOnStart == nil {
++		// Default on: a crash or a systemd restart should not leave every
++		// unfinished task sitting in the paused state.
++		def := true
++		cfg.ResumeOnStart = &def
 +	}
  	return cfg
  }
@@ -142,7 +778,7 @@ diff -urN a/pkg/base/model.go b/pkg/base/model.go
  func (cfg *DownloaderStoreConfig) Merge(beforeCfg *DownloaderStoreConfig) *DownloaderStoreConfig {
  	if beforeCfg == nil {
  		return cfg
-@@ -252,6 +314,9 @@
+@@ -252,6 +351,9 @@
  	if cfg.Archive == nil {
  		cfg.Archive = beforeCfg.Archive
  	}
@@ -152,7 +788,7 @@ diff -urN a/pkg/base/model.go b/pkg/base/model.go
  	return cfg
  }
  
-@@ -277,6 +342,9 @@
+@@ -277,10 +379,26 @@
  type ArchiveConfig struct {
  	AutoExtract        bool `json:"autoExtract"`        // AutoExtract enables automatic extraction of archives after download
  	DeleteAfterExtract bool `json:"deleteAfterExtract"` // DeleteAfterExtract deletes the archive after successful extraction
@@ -162,9 +798,239 @@ diff -urN a/pkg/base/model.go b/pkg/base/model.go
  }
  
  type DownloaderProxyConfig struct {
-diff -urN a/pkg/download/downloader.go b/pkg/download/downloader.go
---- a/pkg/download/downloader.go	2026-11-11 18:09:40.134687000 +0800
-+++ b/pkg/download/downloader.go	2026-11-11 18:09:40.187431500 +0800
+ 	Enable bool `json:"enable"`
++	// Mode decides which downloads go through the proxy: "off", "all" or
++	// "partial". An empty value means "derive it from Enable", so configs
++	// written by older versions keep working.
++	//
++	// The proxy only ever applies to HTTP downloads. BT always
++	// connect directly (BT is a peer-to-peer swarm, a single HTTP proxy in
++	// front of it only breaks trackers and peer discovery).
++	Mode string `json:"mode"`
++	// Keywords is only used by Mode=partial: an HTTP request whose URL
++	// contains any of these strings (case-insensitive) is sent through the
++	// proxy, every other request goes direct. Empty list means nothing is
++	// proxied.
++	Keywords []string `json:"keywords"`
+ 	// System is the flag that use system proxy
+ 	System bool   `json:"system"`
+ 	Scheme string `json:"scheme"`
+@@ -289,8 +407,80 @@
+ 	Pwd    string `json:"pwd"`
+ }
+ 
++// Proxy modes.
++const (
++	ProxyModeOff     = "off"
++	ProxyModeAll     = "all"
++	ProxyModePartial = "partial"
++)
++
++// EffectiveMode returns Mode, falling back to Enable for old configs.
++func (cfg *DownloaderProxyConfig) EffectiveMode() string {
++	if cfg == nil {
++		return ProxyModeOff
++	}
++	switch cfg.Mode {
++	case ProxyModeAll, ProxyModePartial, ProxyModeOff:
++		return cfg.Mode
++	}
++	if cfg.Enable {
++		return ProxyModeAll
++	}
++	return ProxyModeOff
++}
++
++// MatchURL reports whether rawURL should be proxied in partial mode.
++func (cfg *DownloaderProxyConfig) MatchURL(rawURL string) bool {
++	if cfg == nil {
++		return false
++	}
++	lower := strings.ToLower(rawURL)
++	for _, kw := range cfg.Keywords {
++		kw = strings.ToLower(strings.TrimSpace(kw))
++		if kw == "" {
++			continue
++		}
++		if strings.Contains(lower, kw) {
++			return true
++		}
++	}
++	return false
++}
++
++// resolveProxy returns the proxy URL for a single request, ignoring the mode.
++func (cfg *DownloaderProxyConfig) resolveProxy() (*url.URL, error) {
++	if cfg.System {
++		safeProxyReloadConf()
++		handler := ieproxy.GetProxyFunc()
++		if handler == nil {
++			return nil, nil
++		}
++		return handler(&http.Request{URL: &url.URL{Scheme: "http", Host: "example.com"}})
++	}
++	if cfg.Scheme == "" || cfg.Host == "" {
++		return nil, nil
++	}
++	return util.BuildProxyUrl(cfg.Scheme, cfg.Host, cfg.Usr, cfg.Pwd), nil
++}
++
++// Resolve decides per request whether the given URL goes through the proxy.
++// It is the entry point used by the HTTP fetcher, so changing the proxy
++// settings takes effect on running tasks without rebuilding their clients.
++func (cfg *DownloaderProxyConfig) Resolve(rawURL string) (*url.URL, error) {
++	switch cfg.EffectiveMode() {
++	case ProxyModeAll:
++		return cfg.resolveProxy()
++	case ProxyModePartial:
++		if !cfg.MatchURL(rawURL) {
++			return nil, nil
++		}
++		return cfg.resolveProxy()
++	}
++	return nil, nil
++}
++
+ func (cfg *DownloaderProxyConfig) ToHandler() func(r *http.Request) (*url.URL, error) {
+-	if cfg == nil || cfg.Enable == false {
++	if cfg == nil || cfg.EffectiveMode() == ProxyModeOff {
+ 		return nil
+ 	}
+ 	if cfg.System {
+@@ -305,7 +495,8 @@
+ 
+ // ToUrl returns the proxy url, just for git clone
+ func (cfg *DownloaderProxyConfig) ToUrl() *url.URL {
+-	if cfg == nil || cfg.Enable == false {
++	// git clone（扩展安装）只认 all 模式：partial 的关键字表是给下载用的。
++	if cfg == nil || cfg.EffectiveMode() != ProxyModeAll {
+ 		return nil
+ 	}
+ 	if cfg.System {
+--- a/pkg/base/model_test.go
++++ b/pkg/base/model_test.go
+@@ -164,6 +164,28 @@
+ 				AutoTorrent:    tt.fields.AutoTorrent,
+ 				Archive:        tt.fields.Archive,
+ 			}
++			// Local patches (pathMappings / seedAutoRemove / resumeOnStart) make
++			// Init() fill in three more fields; the table above only lists what
++			// each case is actually about.
++			tt.want.PathMappings = []PathMapping{}
++			tt.want.SeedAutoRemove = &SeedAutoRemoveConfig{}
++			defResume := true
++			tt.want.ResumeOnStart = &defResume
++			// Init() also normalises the proxy mode and the keyword slice.
++			if tt.want.Proxy == nil {
++				tt.want.Proxy = &DownloaderProxyConfig{}
++			}
++			if tt.want.Proxy.EffectiveMode() == ProxyModeOff {
++				tt.want.Proxy.Mode = ProxyModeOff
++				tt.want.Proxy.Enable = false
++			} else {
++				tt.want.Proxy.Mode = tt.want.Proxy.EffectiveMode()
++				tt.want.Proxy.Enable = true
++			}
++			if tt.want.Proxy.Keywords == nil {
++				tt.want.Proxy.Keywords = []string{}
++			}
++
+ 			if got := cfg.Init(); !reflect.DeepEqual(got, tt.want) {
+ 				t.Errorf("Init() = %v, want %v", got, tt.want)
+ 			}
+--- /dev/null
++++ b/pkg/base/proxy_test.go
+@@ -0,0 +1,88 @@
++package base
++
++import "testing"
++
++func TestProxyEffectiveMode(t *testing.T) {
++	cases := []struct {
++		name string
++		cfg  *DownloaderProxyConfig
++		want string
++	}{
++		{"nil", nil, ProxyModeOff},
++		{"legacy enabled", &DownloaderProxyConfig{Enable: true}, ProxyModeAll},
++		{"legacy disabled", &DownloaderProxyConfig{}, ProxyModeOff},
++		{"explicit off beats enable", &DownloaderProxyConfig{Enable: true, Mode: ProxyModeOff}, ProxyModeOff},
++		{"explicit partial", &DownloaderProxyConfig{Mode: ProxyModePartial}, ProxyModePartial},
++		{"explicit all", &DownloaderProxyConfig{Mode: ProxyModeAll}, ProxyModeAll},
++		{"unknown falls back", &DownloaderProxyConfig{Enable: true, Mode: "whatever"}, ProxyModeAll},
++	}
++	for _, c := range cases {
++		if got := c.cfg.EffectiveMode(); got != c.want {
++			t.Errorf("%s: EffectiveMode() = %q, want %q", c.name, got, c.want)
++		}
++	}
++}
++
++func TestProxyMatchURL(t *testing.T) {
++	cfg := &DownloaderProxyConfig{
++		Keywords: []string{"  GitHub.com ", "", "pixiv"},
++	}
++	cases := map[string]bool{
++		"https://github.com/a/b.zip": true,
++		"https://GITHUB.COM/a/b.zip": true,
++		// 关键字是子串匹配："github.com" 不会命中 githubusercontent.com，
++		// 想连 raw 一起代理就把关键字写成 github
++		"https://objects.githubusercontent.com/x": false,
++		"https://www.pixiv.net/artworks":          true,
++		"https://example.com/a.zip":               false,
++		"":                                        false,
++	}
++	for url, want := range cases {
++		if got := cfg.MatchURL(url); got != want {
++			t.Errorf("MatchURL(%q) = %v, want %v", url, got, want)
++		}
++	}
++	if (&DownloaderProxyConfig{}).MatchURL("https://github.com") {
++		t.Error("empty keyword list must not match")
++	}
++	if (*DownloaderProxyConfig)(nil).MatchURL("https://github.com") {
++		t.Error("nil config must not match")
++	}
++}
++
++func TestProxyResolve(t *testing.T) {
++	base := func(mode string, kws ...string) *DownloaderProxyConfig {
++		return &DownloaderProxyConfig{
++			Mode:     mode,
++			Keywords: kws,
++			Scheme:   "http",
++			Host:     "127.0.0.1:7890",
++		}
++	}
++	// off: never proxies
++	if u, err := base(ProxyModeOff).Resolve("https://github.com/x"); err != nil || u != nil {
++		t.Errorf("off: got %v, %v; want nil, nil", u, err)
++	}
++	// all: always proxies
++	u, err := base(ProxyModeAll).Resolve("https://example.com/x")
++	if err != nil || u == nil || u.Host != "127.0.0.1:7890" {
++		t.Errorf("all: got %v, %v", u, err)
++	}
++	// partial: only matching URLs
++	cfg := base(ProxyModePartial, "github.com")
++	if u, _ := cfg.Resolve("https://example.com/x"); u != nil {
++		t.Errorf("partial non-match should be direct, got %v", u)
++	}
++	u, err = cfg.Resolve("https://github.com/x")
++	if err != nil || u == nil || u.Host != "127.0.0.1:7890" {
++		t.Errorf("partial match should proxy, got %v, %v", u, err)
++	}
++	// partial with no keywords proxies nothing
++	if u, _ := base(ProxyModePartial).Resolve("https://github.com/x"); u != nil {
++		t.Errorf("partial without keywords should be direct, got %v", u)
++	}
++	// enabled but no host: nothing to proxy with
++	if u, _ := (&DownloaderProxyConfig{Mode: ProxyModeAll}).Resolve("https://x/y"); u != nil {
++		t.Errorf("all without host should be nil, got %v", u)
++	}
++}
+--- a/pkg/download/downloader.go
++++ b/pkg/download/downloader.go
 @@ -7,6 +7,7 @@
  	gohttp "net/http"
  	"net/url"
@@ -173,7 +1039,94 @@ diff -urN a/pkg/download/downloader.go b/pkg/download/downloader.go
  	"path/filepath"
  	"runtime/debug"
  	"sort"
-@@ -1025,6 +1026,11 @@
+@@ -111,6 +112,10 @@
+ 	claimedExtractions sync.Map
+ 
+ 	extensions []*Extension
++
++	// resumeOnStartIDs holds tasks that were running/queued before this start;
++	// startResumeOnStart continues them once the downloader is up.
++	resumeOnStartIDs []string
+ }
+ 
+ func NewDownloader(cfg *DownloaderConfig) *Downloader {
+@@ -183,6 +188,9 @@
+ 	if tasks == nil {
+ 		tasks = make([]*Task, 0)
+ 	} else {
++		// resumeIDs keeps the tasks that were running/queued before the restart;
++		// they all get forced into pause below and are continued a moment later.
++		var resumeIDs []string
+ 		for i := len(tasks) - 1; i >= 0; i-- {
+ 			task := tasks[i]
+ 			// Remove broken tasks
+@@ -193,9 +201,13 @@
+ 			d.assignFetcherManager(task)
+ 			initTask(task)
+ 			if task.Status != base.DownloadStatusDone && task.Status != base.DownloadStatusError {
++				if task.Status == base.DownloadStatusRunning || task.Status == base.DownloadStatusWait {
++					resumeIDs = append(resumeIDs, task.ID)
++				}
+ 				task.Status = base.DownloadStatusPause
+ 			}
+ 		}
++		d.resumeOnStartIDs = resumeIDs
+ 	}
+ 	d.tasks = tasks
+ 	// sort by create time
+@@ -216,6 +228,11 @@
+ 	// Auto-cleanup non-existing tasks on startup
+ 	d.cleanupNonExistingTasks()
+ 
++	// Continue the tasks that were interrupted by the restart, and start the
++	// background loop that drops BT tasks which have seeded long enough.
++	d.startResumeOnStart(d.resumeOnStartIDs)
++	d.startSeedAutoRemove()
++
+ 	// handle upload
+ 	go func() {
+ 		for _, task := range d.tasks {
+@@ -343,18 +360,30 @@
+ 	ctl.GetConfig = func(v any) {
+ 		d.getProtocolConfig(fm.Name(), v)
+ 	}
++	// The proxy only exists for HTTP downloads. BT is a swarm protocol and a
++	// single HTTP proxy in front of it only breaks trackers and peer traffic,
++	// so BT (which never uses an HTTP transport) always goes direct.
++	proto := fm.Name()
+ 	// Get proxy config, task request proxy config has higher priority, then use global proxy config
+ 	ctl.GetProxy = func(requestProxy *base.RequestProxy) func(*gohttp.Request) (*url.URL, error) {
+-		if requestProxy == nil {
+-			return d.cfg.Proxy.ToHandler()
+-		}
+-		switch requestProxy.Mode {
+-		case base.RequestProxyModeNone:
++		if proto != "http" {
+ 			return nil
+-		case base.RequestProxyModeCustom:
+-			return requestProxy.ToHandler()
+-		default:
+-			return d.cfg.Proxy.ToHandler()
++		}
++		if requestProxy != nil {
++			switch requestProxy.Mode {
++			case base.RequestProxyModeNone:
++				return nil
++			case base.RequestProxyModeCustom:
++				return requestProxy.ToHandler()
++			}
++		}
++		// Resolve per request (not per client) so that switching the mode or
++		// editing the keyword list applies to running tasks immediately.
++		return func(r *gohttp.Request) (*url.URL, error) {
++			if r == nil || r.URL == nil {
++				return nil, nil
++			}
++			return d.cfg.Proxy.Resolve(r.URL.String())
+ 		}
+ 	}
+ 	fetcher.Setup(ctl)
+@@ -1025,6 +1054,11 @@
  	task.Progress.Downloaded = totalSize
  	task.updateStatus(base.DownloadStatusDone)
  	d.storage.Put(bucketTask, task.ID, task.clone())
@@ -185,7 +1138,7 @@ diff -urN a/pkg/download/downloader.go b/pkg/download/downloader.go
  	d.emit(EventKeyDone, task)
  	d.emit(EventKeyFinally, task, err)
  	d.notifyRunning()
-@@ -1082,6 +1088,14 @@
+@@ -1082,6 +1116,14 @@
  			autoExtractEnabled = cfg.Archive.AutoExtract
  		}
  
@@ -200,7 +1153,7 @@ diff -urN a/pkg/download/downloader.go b/pkg/download/downloader.go
  		// Auto-extract archive files using the extraction queue
  		// This ensures only one extraction runs at a time to prevent resource exhaustion
  		if autoExtractEnabled && isArchiveFile(downloadFilePath) {
-@@ -1090,6 +1104,103 @@
+@@ -1090,6 +1132,103 @@
  	}
  }
  
@@ -304,7 +1257,7 @@ diff -urN a/pkg/download/downloader.go b/pkg/download/downloader.go
  func (d *Downloader) doOnError(task *Task, err error) {
  	d.Logger.Warn().Err(err).Msgf("task download failed, task id: %s", task.ID)
  	task.updateStatus(base.DownloadStatusError)
-@@ -1197,6 +1308,13 @@
+@@ -1197,6 +1336,13 @@
  	// Replace placeholders in download path (e.g., %year%, %month%, %day%, %date%)
  	opts.Path = util.ReplacePathPlaceholders(opts.Path)
  
@@ -318,7 +1271,7 @@ diff -urN a/pkg/download/downloader.go b/pkg/download/downloader.go
  	// if enable white download directory, check if the download directory is in the white list
  	if len(d.cfg.WhiteDownloadDirs) > 0 {
  		inWhiteList := false
-@@ -1551,7 +1669,8 @@
+@@ -1551,7 +1697,8 @@
  	d.storage.Put(bucketTask, task.ID, task.clone())
  
  	// Extract the archive
@@ -328,7 +1281,7 @@ diff -urN a/pkg/download/downloader.go b/pkg/download/downloader.go
  		task.Progress.ExtractProgress = progress
  		d.emit(EventKeyProgress, task)
  	})
-@@ -1573,7 +1692,8 @@
+@@ -1573,7 +1720,8 @@
  	d.Logger.Info().Msgf("starting multi-part archive extraction, first part: %s, task id: %s", firstPartPath, task.ID)
  
  	// Extract the multi-part archive
@@ -338,7 +1291,7 @@ diff -urN a/pkg/download/downloader.go b/pkg/download/downloader.go
  		task.Progress.ExtractProgress = progress
  		d.emit(EventKeyProgress, task)
  	})
-@@ -1706,6 +1826,9 @@
+@@ -1706,6 +1854,9 @@
  	return files
  }
  
@@ -348,7 +1301,7 @@ diff -urN a/pkg/download/downloader.go b/pkg/download/downloader.go
  // handleExtractionResult handles the result of an extraction operation
  func (d *Downloader) handleExtractionResult(task *Task, extractErr error, archiveFiles []string, deleteAfterExtract bool) {
  	if extractErr != nil {
-@@ -1720,16 +1843,23 @@
+@@ -1720,16 +1871,23 @@
  		d.emit(EventKeyProgress, task)
  		d.storage.Put(bucketTask, task.ID, task.clone())
  
@@ -380,9 +1333,61 @@ diff -urN a/pkg/download/downloader.go b/pkg/download/downloader.go
  		}
  	}
  }
-diff -urN a/pkg/download/extract_password.go b/pkg/download/extract_password.go
---- a/pkg/download/extract_password.go	1970-01-01 08:00:00.000000000 +0800
-+++ b/pkg/download/extract_password.go	2026-11-11 18:09:40.220436000 +0800
+--- a/pkg/download/downloader_test.go
++++ b/pkg/download/downloader_test.go
+@@ -1181,12 +1181,10 @@
+ 		t.Log("Extraction timed out")
+ 	}
+ 
+-	// Give time for file deletion
+-	time.Sleep(200 * time.Millisecond)
+-
+-	// Verify archive was deleted
++	// The archive is removed asynchronously, `archiveDeleteDelay` after the
++	// extraction finished, so poll instead of checking immediately.
+ 	archivePath := downloadDir + "/archive.zip"
+-	if _, err := os.Stat(archivePath); !os.IsNotExist(err) {
++	if !waitFileGone(t, archivePath, archiveDeleteDelay+5*time.Second) {
+ 		t.Error("Expected archive to be deleted after extraction")
+ 	}
+ 
+@@ -2082,11 +2080,12 @@
+ 		t.Errorf("ExtractStatus = %v, want %v", task.Progress.ExtractStatus, ExtractStatusDone)
+ 	}
+ 
+-	// Archives should be deleted
+-	if _, err := os.Stat(archivePath1); !os.IsNotExist(err) {
++	// Deletion is delayed and asynchronous, so poll for it.
++	timeout := archiveDeleteDelay + 5*time.Second
++	if !waitFileGone(t, archivePath1, timeout) {
+ 		t.Error("Archive 1 should be deleted when deleteAfterExtract=true")
+ 	}
+-	if _, err := os.Stat(archivePath2); !os.IsNotExist(err) {
++	if !waitFileGone(t, archivePath2, timeout) {
+ 		t.Error("Archive 2 should be deleted when deleteAfterExtract=true")
+ 	}
+ }
+@@ -2732,3 +2731,18 @@
+ 		t.Errorf("Patch() error = %v, want %v", err, ErrTaskNotFound)
+ 	}
+ }
++
++// waitFileGone polls path until it no longer exists, or timeout expires.
++func waitFileGone(t *testing.T, path string, timeout time.Duration) bool {
++	t.Helper()
++	deadline := time.Now().Add(timeout)
++	for {
++		if _, err := os.Stat(path); os.IsNotExist(err) {
++			return true
++		}
++		if time.Now().After(deadline) {
++			return false
++		}
++		time.Sleep(50 * time.Millisecond)
++	}
++}
+--- /dev/null
++++ b/pkg/download/extract_password.go
 @@ -0,0 +1,315 @@
 +package download
 +
@@ -699,4 +1704,303 @@ diff -urN a/pkg/download/extract_password.go b/pkg/download/extract_password.go
 +	}
 +	return false, nil
 +}
-\ No newline at end of file
+--- a/pkg/download/model.go
++++ b/pkg/download/model.go
+@@ -8,7 +8,6 @@
+ 	"github.com/GopeedLab/gopeed/internal/controller"
+ 	"github.com/GopeedLab/gopeed/internal/fetcher"
+ 	"github.com/GopeedLab/gopeed/internal/protocol/bt"
+-	"github.com/GopeedLab/gopeed/internal/protocol/ed2k"
+ 	"github.com/GopeedLab/gopeed/internal/protocol/http"
+ 	"github.com/GopeedLab/gopeed/pkg/base"
+ 	"github.com/GopeedLab/gopeed/pkg/util"
+@@ -167,7 +166,6 @@
+ 		cfg.FetchManagers = []fetcher.FetcherManager{
+ 			new(http.FetcherManager),
+ 			new(bt.FetcherManager),
+-			new(ed2k.FetcherManager),
+ 		}
+ 	}
+ 	if cfg.RefreshInterval == 0 {
+--- /dev/null
++++ b/pkg/download/resume_on_start.go
+@@ -0,0 +1,50 @@
++package download
++
++import (
++	"time"
++
++	"github.com/GopeedLab/gopeed/pkg/base"
++)
++
++// shouldResumeOnStart reports whether unfinished tasks found at startup should
++// be continued automatically.
++func shouldResumeOnStart(cfg *base.DownloaderStoreConfig) bool {
++	if cfg == nil {
++		return true
++	}
++	// Missing key (old config) means "on".
++	return cfg.ResumeOnStart == nil || *cfg.ResumeOnStart
++}
++
++// startResumeOnStart continues the tasks that were running (or queued) when the
++// process died. They were forced into the pause state while loading, so without
++// this every restart leaves the user with a pile of paused tasks.
++func (d *Downloader) startResumeOnStart(ids []string) {
++	if len(ids) == 0 {
++		return
++	}
++	d.Logger.Info().Msgf("resume on start: found %d unfinished tasks", len(ids))
++	go func() {
++		// Give the fetchers a moment to settle before touching them.
++		time.Sleep(2 * time.Second)
++		if d.closed.Load() {
++			return
++		}
++		if !shouldResumeOnStart(d.cfg.DownloaderStoreConfig) {
++			d.Logger.Info().Msg("resume on start: disabled by config, skip")
++			return
++		}
++		resumed := 0
++		for _, id := range ids {
++			if d.GetTask(id) == nil {
++				continue
++			}
++			if err := d.Continue(&TaskFilter{IDs: []string{id}}); err != nil {
++				d.Logger.Error().Err(err).Msgf("resume on start: continue task %s failed", id)
++				continue
++			}
++			resumed++
++		}
++		d.Logger.Info().Msgf("resume on start: 已恢复 %d 个未完成任务", resumed)
++	}()
++}
+--- /dev/null
++++ b/pkg/download/seed_autoremove.go
+@@ -0,0 +1,135 @@
++package download
++
++import (
++	"time"
++
++	"github.com/GopeedLab/gopeed/pkg/base"
++)
++
++// seedAutoRemoveInterval is how often finished BT tasks are inspected. It is a
++// variable so the test suite can shrink it.
++var seedAutoRemoveInterval = 10 * time.Minute
++
++// seedWatch remembers, per task, how long its uploaded byte counter has been
++// standing still. It is kept in memory only: a restart simply gives every task
++// a fresh grace period.
++type seedWatch struct {
++	uploaded int64
++	since    time.Time
++}
++
++// seedAutoRemoveReason reports why a finished BT task should be dropped from
++// the task list, or "" when it should stay.
++//
++//	ratio  : uploaded/downloaded reached cfg.Ratio
++//	idle   : no new uploaded bytes for cfg.IdleMinutes minutes
++//
++// A zero Ratio/IdleMinutes disables that condition on its own; a disabled or
++// missing config disables both.
++func seedAutoRemoveReason(cfg *base.SeedAutoRemoveConfig, downloaded, uploaded int64, idle time.Duration) string {
++	if cfg == nil || !cfg.Enable {
++		return ""
++	}
++	if cfg.Ratio > 0 && downloaded > 0 {
++		if float64(uploaded)/float64(downloaded) >= cfg.Ratio {
++			return "ratio"
++		}
++	}
++	if cfg.IdleMinutes > 0 && idle >= time.Duration(cfg.IdleMinutes)*time.Minute {
++		return "idle"
++	}
++	return ""
++}
++
++// startSeedAutoRemove launches the background loop. It never runs a check
++// immediately, so a task that just finished gets a full interval of seeding
++// before it can be dropped.
++func (d *Downloader) startSeedAutoRemove() {
++	go func() {
++		watch := make(map[string]*seedWatch)
++		for !d.closed.Load() {
++			time.Sleep(seedAutoRemoveInterval)
++			if d.closed.Load() {
++				return
++			}
++			func() {
++				defer func() {
++					if r := recover(); r != nil {
++						d.Logger.Error().Msgf("seed auto remove panic: %v", r)
++					}
++				}()
++				d.seedAutoRemoveTick(watch)
++			}()
++		}
++	}()
++}
++
++// seedAutoRemoveTick performs one inspection round. Tasks that are still
++// extracting are skipped: deleting the record mid-extraction would leave the
++// extract queue pointing at a task that no longer exists.
++func (d *Downloader) seedAutoRemoveTick(watch map[string]*seedWatch) {
++	cfg, err := d.GetConfig()
++	if err != nil || cfg == nil || cfg.SeedAutoRemove == nil || !cfg.SeedAutoRemove.Enable {
++		return
++	}
++
++	now := time.Now()
++	alive := make(map[string]bool, len(watch))
++
++	// Snapshot the task list under the lock: Delete() splices d.tasks in place,
++	// and ranging over the live slice would skip the task that slides into the
++	// freed slot.
++	d.lock.Lock()
++	tasks := append([]*Task(nil), d.tasks...)
++	d.lock.Unlock()
++
++	for _, task := range tasks {
++		if task == nil || task.Progress == nil {
++			continue
++		}
++		if task.Protocol != "bt" || task.Status != base.DownloadStatusDone {
++			continue
++		}
++		switch task.Progress.ExtractStatus {
++		case ExtractStatusQueued, ExtractStatusWaitingParts, ExtractStatusExtracting:
++			continue
++		}
++		alive[task.ID] = true
++
++		w := watch[task.ID]
++		if w == nil {
++			watch[task.ID] = &seedWatch{uploaded: task.Progress.Uploaded, since: now}
++			continue
++		}
++		if task.Progress.Uploaded > w.uploaded {
++			w.uploaded = task.Progress.Uploaded
++			w.since = now
++		}
++
++		reason := seedAutoRemoveReason(cfg.SeedAutoRemove, task.Progress.Downloaded, task.Progress.Uploaded, now.Sub(w.since))
++		if reason == "" {
++			continue
++		}
++		// force=false: keep the downloaded files, only drop the task record.
++		if err := d.Delete(&TaskFilter{IDs: []string{task.ID}}, false); err != nil {
++			d.Logger.Error().Err(err).Msgf("seed auto remove: delete task %s failed", task.ID)
++			continue
++		}
++		delete(watch, task.ID)
++		d.Logger.Info().Msgf("seed auto remove: task %s removed (%s, ratio %.2f, uploaded %d)", task.ID, reason, ratioOf(task), task.Progress.Uploaded)
++	}
++
++	// Forget tasks that disappeared for other reasons (user deleted them).
++	for id := range watch {
++		if !alive[id] {
++			delete(watch, id)
++		}
++	}
++}
++
++func ratioOf(task *Task) float64 {
++	if task.Progress == nil || task.Progress.Downloaded == 0 {
++		return 0
++	}
++	return float64(task.Progress.Uploaded) / float64(task.Progress.Downloaded)
++}
+--- /dev/null
++++ b/pkg/download/seed_autoremove_test.go
+@@ -0,0 +1,71 @@
++package download
++
++import (
++	"testing"
++	"time"
++
++	"github.com/GopeedLab/gopeed/pkg/base"
++)
++
++func TestSeedAutoRemoveReason(t *testing.T) {
++	on := &base.SeedAutoRemoveConfig{Enable: true, Ratio: 2, IdleMinutes: 30}
++	off := &base.SeedAutoRemoveConfig{Enable: false, Ratio: 2, IdleMinutes: 30}
++
++	tests := []struct {
++		name       string
++		cfg        *base.SeedAutoRemoveConfig
++		downloaded int64
++		uploaded   int64
++		idle       time.Duration
++		want       string
++	}{
++		{"disabled", off, 100, 1000, 10 * time.Hour, ""},
++		{"nil config", nil, 100, 1000, 10 * time.Hour, ""},
++		{"nothing reached", on, 100, 100, time.Minute, ""},
++		{"ratio reached", on, 100, 200, time.Minute, "ratio"},
++		{"ratio above", on, 100, 500, time.Minute, "ratio"},
++		{"idle reached", on, 100, 100, 30 * time.Minute, "idle"},
++		{"idle below", on, 100, 100, 29 * time.Minute, ""},
++		{"both reached prefers ratio", on, 100, 300, time.Hour, "ratio"},
++		{"zero ratio means ignore", &base.SeedAutoRemoveConfig{Enable: true, Ratio: 0, IdleMinutes: 30}, 100, 100000, time.Minute, ""},
++		{"zero idle means ignore", &base.SeedAutoRemoveConfig{Enable: true, Ratio: 2, IdleMinutes: 0}, 100, 100, time.Hour, ""},
++		{"zero ratio and idle never fires", &base.SeedAutoRemoveConfig{Enable: true}, 100, 100, time.Hour, ""},
++		{"downloaded zero skips ratio", on, 0, 1000, time.Minute, ""},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			if got := seedAutoRemoveReason(tt.cfg, tt.downloaded, tt.uploaded, tt.idle); got != tt.want {
++				t.Fatalf("seedAutoRemoveReason() = %q, want %q", got, tt.want)
++			}
++		})
++	}
++}
++
++func TestShouldResumeOnStart(t *testing.T) {
++	yes, no := true, false
++	if !shouldResumeOnStart(nil) {
++		t.Fatal("nil config should resume")
++	}
++	if !shouldResumeOnStart(&base.DownloaderStoreConfig{}) {
++		t.Fatal("missing key should resume")
++	}
++	if !shouldResumeOnStart(&base.DownloaderStoreConfig{ResumeOnStart: &yes}) {
++		t.Fatal("explicit true should resume")
++	}
++	if shouldResumeOnStart(&base.DownloaderStoreConfig{ResumeOnStart: &no}) {
++		t.Fatal("explicit false must not resume")
++	}
++}
++
++func TestStoreConfigSeedDefaults(t *testing.T) {
++	cfg := (&base.DownloaderStoreConfig{}).Init()
++	if cfg.SeedAutoRemove == nil {
++		t.Fatal("SeedAutoRemove should be initialised")
++	}
++	if cfg.SeedAutoRemove.Enable {
++		t.Fatal("SeedAutoRemove should default to disabled")
++	}
++	if cfg.ResumeOnStart == nil || !*cfg.ResumeOnStart {
++		t.Fatal("ResumeOnStart should default to true")
++	}
++}
+--- a/pkg/protocol/ed2k/model.go
++++ /dev/null
+@@ -1,14 +0,0 @@
+-package ed2k
+-
+-type Stats struct {
+-	State         string `json:"state"`
+-	Paused        bool   `json:"paused"`
+-	ActivePeers   int    `json:"activePeers"`
+-	TotalPeers    int    `json:"totalPeers"`
+-	DownloadRate  int    `json:"downloadRate"`
+-	Upload        int64  `json:"upload"`
+-	UploadRate    int    `json:"uploadRate"`
+-	TotalDone     int64  `json:"totalDone"`
+-	TotalReceived int64  `json:"totalReceived"`
+-	TotalWanted   int64  `json:"totalWanted"`
+-}

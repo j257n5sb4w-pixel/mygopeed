@@ -2,11 +2,13 @@
 
 自用的一套 gopeed 定制方案，跑在一台 OrangePi Zero3（ARM64，Debian）上：
 
-- **gopeed-patched/** —— gopeed v1.9.3 的**源码补丁版**（headless，无内嵌 UI）。在官方源码上叠了五类改动：
+- **gopeed-patched/** —— gopeed v1.9.3 的**源码补丁版**（headless，不嵌官方前端）。在官方源码上叠了九类改动：
   下载完成后自动改名（`opts.rename`）、目录映射（`pathMappings`）、全局解压密码表（`archive.passwords`）、
-  解压完成后延迟删压缩包、BT 删除时的空指针保护。
-  完整 diff 见 [gopeed-patched/local-patches.patch](gopeed-patched/local-patches.patch)，细节见
-  [gopeed-patched/README.md](gopeed-patched/README.md)。
+  解压完成后延迟删压缩包、BT 删除时的空指针保护、做种自动清理（`seedAutoRemove`）、
+  启动后自动续传（`resumeOnStart`）、代理只作用于 HTTP（`proxy.mode` = `off`/`all`/`partial` + `keywords`）、
+  以及**移除 ed2k 协议**（FetcherManager 只留 http/bt）。
+  完整 diff（17 个文件：8 改 5 增 4 删）见 [gopeed-patched/local-patches.patch](gopeed-patched/local-patches.patch)，
+  细节见 [gopeed-patched/README.md](gopeed-patched/README.md)。
 - **gopeed-web/** —— 用 [MyGo](https://github.com/egoist/mygo)（Go → WebAssembly）写的 gopeed 面板，
   编译成 `app.wasm` 后由 Caddy 静态托管（`web/` 目录里带着构建好的产物）。
   功能：任务列表/详情/暂停/删除/设置/解压密码，并适配了上面补丁版的 `rename` 能力。

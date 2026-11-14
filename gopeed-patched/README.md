@@ -3,7 +3,7 @@
 服务器 `192.0.2.10` 上的 `/opt/gopeed/bin/gopeed` **不是官方原版**，是 `gd/` 目录源码编译出来的 headless 版
 （`go build ./cmd/gopeed-headless -tags nosqlite`，只开 REST、不嵌前端，`/` 返回 404，和官方 headless 行为一致）。
 
-这份源码在官方 1.9.3 基础上叠了五类改动：
+这份源码在官方 1.9.3 基础上叠了 **9 类改动**（表格按「能被删的都删了、缺的能力都补上」排列）：
 
 | 改动 | 文件 | 说明 |
 | --- | --- | --- |
@@ -12,8 +12,19 @@
 | **下载完成后自动改名**（新增） | `pkg/base/model.go`、`pkg/download/downloader.go`、`internal/protocol/bt/fetcher.go` | 建任务时给 `opts.rename`，任务 done 后 gopeed 自己 `os.Rename`，并同步任务记录里的名字 |
 | **路径映射**（新增） | `pkg/base/model.go`、`pkg/download/downloader.go` | 配置项 `pathMappings: [{from,to}]`，建任务时把 `opts.path` 按最长前缀换成本机真实路径 |
 | **BT 删除空指针保护**（新增） | `internal/protocol/bt/fetcher.go` | `Close()` 检查 `client != nil` 再取 `Torrents()`，避免删任务时 panic |
+| **做种自动清理**（2026-11-14 合并） | `pkg/base/model.go`、`pkg/download/seed_autoremove.go` | `seedAutoRemove{enable,ratio,idleMinutes}`：BT 任务 done 后分享率达标、或连续 N 分钟没有上传字节，就删掉任务记录（`force=false`，磁盘文件保留），后台每 10 分钟扫一次 |
+| **启动后自动续传**（2026-11-14 合并） | `pkg/base/model.go`、`pkg/download/resume_on_start.go`、`pkg/download/downloader.go` | `resumeOnStart`（默认 true）：重启后把原本 running/wait 的任务自动继续；手动暂停的不动 |
+| **代理只管 HTTP**（2026-11-14） | `pkg/base/model.go`、`pkg/download/downloader.go` | `proxy.mode` = `off`/`all`/`partial` + `proxy.keywords[]`；只有 http 协议拿到代理函数，BT 永远直连；partial 模式按请求 URL 子串匹配，命中才走代理 |
+| **移除 ed2k 协议**（2026-11-14） | 删除 `internal/protocol/ed2k/`、`pkg/protocol/ed2k/`；`pkg/download/model.go`、`go.mod` | ed2k 全链路删掉（FetcherManager 只留 http/bt、goed2k 依赖移除），`ed2k://` 链接统一报 `unsupported protocol` |
 
-完整 diff 一次打全：**`local-patches.patch`**（对官方 v1.9.3 的 4 个文件，`patch -p1` 可直接打；已 dry-run 验证）。
+完整 diff 一次打全：**`local-patches.patch`**（共 **17 个文件**：8 个改动、5 个新增、4 个删除（ed2k 两个目录下的 4 个文件），2006 行；`patch -p1` 可直接打，已 dry-run + 实打后与源码树逐字节比对验证）。
+
+> **2026-11-14 合并说明**：另一个 agent 曾用「官方 1.9.3 + 做种清理」重编了一版覆盖线上，把这里的改名 / 路径映射 / 密码表 / 延迟删包全丢了。现在两边已经合并回一份源码树（就是本目录 `gd/`），线上二进制 `1.9.3-local` 同时带全部七类改动，编译命令见下。
+
+```bash
+# 合并版（线上就是它）
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -tags "nosqlite,web" -trimpath \n  -ldflags "-s -w -X github.com/GopeedLab/gopeed/pkg/base.Version=1.9.3-local" -o gopeed ./cmd/web
+```
 旧的 `delete-after-extract.patch` 只含解压那一半，留着当分项参考。
 
 ## 为什么需要这些补丁
@@ -192,8 +203,79 @@ bolt 数据库（`/opt/gopeed/storage/gopeed.db`）与配置文件向后兼容�
 
 ## 注意
 
-- **升级官方版本会丢这些改动**。升级前把 `local-patches.patch` 重新打到新源码上（含密码表、延迟删包、改名、路径映射、BT 删除空指针保护五部分）。
+- **升级官方版本会丢这些改动**。升级前把 `local-patches.patch` 重新打到新源码上（含密码表、延迟删包、改名、路径映射、BT 删除空指针保护、做种自动清理、启动续传、代理分流、移除 ed2k 共九部分）。
 - 加密压缩包密码是**按任务**存 `opts.extra.archivePassword`，全局密码表在 `archive.passwords`，两者可以并存，任务级优先。
 - 改名是「下载完成之后」做，不是下载前。想下载前就定名得用 `opts.name`，但那会破坏后缀判断，不建议。
 - 曾经有个叫 `gopeed-extract-clean` 的外挂 Python 守护进程做解压删除，已彻底删掉（systemd 单元、`/opt/gopeed-extract-clean`、`/var/lib/gopeed-extract-clean` 全部移除）。
 - 曾经有个叫 `gopeed-push` 的推送网关（8091）做改名/映射/清理，同样已彻底删掉，功能已并入 gopeed 本体。
+
+## 6. 做种自动清理 `seedAutoRemove`
+
+BT 任务正常下载完成后，满足下面任意一条就把**任务记录**删掉（`force=false`，磁盘文件不动）：
+
+- 分享率（上传 ÷ 下载）≥ `ratio`
+- 连续 `idleMinutes` 分钟没有任何新的上传字节（没人拉了）
+
+```json
+"seedAutoRemove": { "enable": true, "ratio": 2, "idleMinutes": 30 }
+```
+
+- `ratio: 0` / `idleMinutes: 0` 分别表示不按该条件判断；`enable: false` 全关
+- 后台**每 10 分钟**扫一次（`seedAutoRemoveInterval`），所以 `idleMinutes` 要明显大于 10 才有意义
+- 跳过 `extractStatus` 为 `queued/waitingParts/extracting` 的任务，避免删掉正在解压的记录
+- 空闲时长用内存里的「上传字节数多久没涨」判断，进程重启会给每个任务重新计时
+
+## 7. 启动后自动续传 `resumeOnStart`
+
+gopeed 加载任务时会把所有非 done/error 任务统一置为 `pause`（`Setup` 里写死），所以进程重启后下到一半的任务会全部停住。
+补丁在同一个循环里先记下原本是 `running`/`wait` 的 ID，2 秒后逐个 `Continue`：
+
+```json
+"resumeOnStart": true
+```
+
+- 缺省或没有这个键 = 开；`false` 关
+- 手动暂停的任务落盘状态就是 `pause`，不在恢复名单里
+- 日志：`resume on start: found N unfinished tasks` / `resume on start: 已恢复 N 个未完成任务`
+
+## 8. 代理只作用于 HTTP，并支持按网址关键字分流
+
+原版把 `proxy` 交给每个协议：`bt` 拿它当 tracker/peer 的 HTTP 代理，`http` 拿它当下载代理，
+实际用起来 BT 挂代理只会拖慢 tracker 和 peer 发现，所以本补丁把范围收紧：
+
+- `downloader.setupFetcher` 里按 `fm.Name()` 判断，**只有 `http` 拿到代理函数**；`bt` 一律返回 `nil`（直连）。
+- 配置加了 `mode` 与 `keywords`：
+
+```json
+"proxy": {
+  "enable": true,
+  "mode": "partial",
+  "keywords": ["github.com", "pixiv"],
+  "scheme": "http",
+  "host": "127.0.0.1:7890",
+  "usr": "",
+  "pwd": ""
+}
+```
+
+| `mode` | 行为 |
+| --- | --- |
+| `off` | 谁都不走代理 |
+| `all` | 所有 HTTP / HTTPS 下载走代理 |
+| `partial` | 只有请求网址里含 `keywords` 任意一项（子串、不区分大小写）才走代理，其余直连 |
+
+- 兼容老配置：`mode` 为空时按 `enable` 推成 `all` / `off`，`Init()` 会把两者同步写回。
+- 判断发生在**每次请求**（`Transport.Proxy` 回调里 `Resolve(r.URL)`），所以改配置、加关键字对正在跑的任务立即生效，不用重建客户端。
+- `keywords` 为空 = partial 模式下谁都不走代理（不会误把所有流量塞进代理）。
+- 任务级的 `req.proxy`（`follow` / `none` / `custom`）仍然优先，语义不变。
+- 扩展安装用的 git clone 只认 `all` 模式（`ToUrl()`），`partial` 时按直连处理。
+
+## 面板对应位置
+
+本仓库的 `gopeed-web/`（MyGo wasm 面板）的设置弹窗 → **BT** 标签页，已内置这两个功能的开关和输入框：
+
+- 「做种自动清理任务」+「目标分享率」+「无上传清理（分钟）」
+- 「重启后自动续传」
+
+面板的 `gConfig` 必须声明 `seedAutoRemove` / `resumeOnStart` / `pathMappings` 三个字段，因为 `PUT /api/v1/config`
+是整份替换，漏声明就会把它们清空（这条曾经真实发生过一次，见上面合并说明）。

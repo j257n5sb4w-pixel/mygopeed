@@ -46,7 +46,7 @@
   }
   const go = new Go();
   let inst;
-  WebAssembly.instantiateStreaming(fetch('app.wasm?v=20261111f'), go.importObject)
+  WebAssembly.instantiateStreaming(fetch('app.wasm?v=20261114d'), go.importObject)
     .then((r) => { inst = r.instance; return go.run(inst); })
     .then(() => {
       // Go 程序退出（正常不会发生）
@@ -55,7 +55,7 @@
     .catch((e) => {
       // 某些服务器不给 application/wasm 类型，instantiateStreaming 会失败，退回字节数组
       if (e instanceof TypeError || (e && /MIME|magic|failed to fetch/i.test(e.message || ''))) {
-        return fetch('app.wasm?v=20261111f')
+        return fetch('app.wasm?v=20261114d')
           .then((r) => r.arrayBuffer())
           .then((buf) => WebAssembly.instantiate(buf, go.importObject))
           .then((r) => go.run(r.instance))

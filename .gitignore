@@ -2,10 +2,7 @@
 *.exe
 *.test
 *.out
-# wasm 构建输出（web/ 下保留构建好的产物，根目录这份只是构建时副本）
+
+# 构建副本（web/ 下的产物与 push 二进制是有意提交的，方便直接部署）
 gopeed-web/app.wasm
 gopeed-web/app.wasm.gz
-
-gopeed-web/web/app.wasm
-gopeed-web/web/app.wasm.gz
-gopeed-push/gopeed-push-linux-arm64

@@ -198,6 +198,22 @@ type DownloaderStoreConfig struct {
 	Archive                    *ArchiveConfig         `json:"archive"`                    // Archive is the archive extraction configuration
 	AutoDeleteMissingFileTasks bool                   `json:"autoDeleteMissingFileTasks"` // AutoDeleteMissingFileTasks enables automatic deletion of tasks with missing files
 	PathMappings               []PathMapping          `json:"pathMappings"`               // PathMappings rewrites incoming download directories to real on-disk directories
+	SeedAutoRemove             *SeedAutoRemoveConfig  `json:"seedAutoRemove"`             // SeedAutoRemove drops finished BT tasks that have seeded enough
+	ResumeOnStart              *bool                  `json:"resumeOnStart"`              // ResumeOnStart continues unfinished tasks after a restart
+}
+
+// SeedAutoRemoveConfig drops a finished BT task from the list once it has
+// seeded enough. The task record is removed with force=false, so the
+// downloaded files stay on disk. Ratio and IdleMinutes are independent
+// conditions; 0 disables that condition, and Enable=false disables both.
+type SeedAutoRemoveConfig struct {
+	// Enable turns the whole feature on.
+	Enable bool `json:"enable"`
+	// Ratio removes the task once uploaded/downloaded reaches this value.
+	Ratio float64 `json:"ratio"`
+	// IdleMinutes removes the task after this many minutes without any new
+	// uploaded bytes, i.e. nobody is downloading from us any more.
+	IdleMinutes int64 `json:"idleMinutes"`
 }
 
 // PathMapping rewrites a download directory prefix.
@@ -222,6 +238,18 @@ func (cfg *DownloaderStoreConfig) Init() *DownloaderStoreConfig {
 	if cfg.Proxy == nil {
 		cfg.Proxy = &DownloaderProxyConfig{}
 	}
+	// Normalise the proxy mode: old configs only had Enable, new ones have a
+	// three-way Mode. Keep both in sync so the panel and the JSON stay sane.
+	if cfg.Proxy.EffectiveMode() == ProxyModeOff {
+		cfg.Proxy.Mode = ProxyModeOff
+		cfg.Proxy.Enable = false
+	} else {
+		cfg.Proxy.Mode = cfg.Proxy.EffectiveMode()
+		cfg.Proxy.Enable = true
+	}
+	if cfg.Proxy.Keywords == nil {
+		cfg.Proxy.Keywords = []string{}
+	}
 	if cfg.Webhook == nil {
 		cfg.Webhook = &WebhookConfig{}
 	}
@@ -242,6 +270,15 @@ func (cfg *DownloaderStoreConfig) Init() *DownloaderStoreConfig {
 	}
 	if cfg.PathMappings == nil {
 		cfg.PathMappings = []PathMapping{}
+	}
+	if cfg.SeedAutoRemove == nil {
+		cfg.SeedAutoRemove = &SeedAutoRemoveConfig{}
+	}
+	if cfg.ResumeOnStart == nil {
+		// Default on: a crash or a systemd restart should not leave every
+		// unfinished task sitting in the paused state.
+		def := true
+		cfg.ResumeOnStart = &def
 	}
 	return cfg
 }
@@ -349,6 +386,19 @@ type ArchiveConfig struct {
 
 type DownloaderProxyConfig struct {
 	Enable bool `json:"enable"`
+	// Mode decides which downloads go through the proxy: "off", "all" or
+	// "partial". An empty value means "derive it from Enable", so configs
+	// written by older versions keep working.
+	//
+	// The proxy only ever applies to HTTP downloads. BT always
+	// connect directly (BT is a peer-to-peer swarm, a single HTTP proxy in
+	// front of it only breaks trackers and peer discovery).
+	Mode string `json:"mode"`
+	// Keywords is only used by Mode=partial: an HTTP request whose URL
+	// contains any of these strings (case-insensitive) is sent through the
+	// proxy, every other request goes direct. Empty list means nothing is
+	// proxied.
+	Keywords []string `json:"keywords"`
 	// System is the flag that use system proxy
 	System bool   `json:"system"`
 	Scheme string `json:"scheme"`
@@ -357,8 +407,80 @@ type DownloaderProxyConfig struct {
 	Pwd    string `json:"pwd"`
 }
 
+// Proxy modes.
+const (
+	ProxyModeOff     = "off"
+	ProxyModeAll     = "all"
+	ProxyModePartial = "partial"
+)
+
+// EffectiveMode returns Mode, falling back to Enable for old configs.
+func (cfg *DownloaderProxyConfig) EffectiveMode() string {
+	if cfg == nil {
+		return ProxyModeOff
+	}
+	switch cfg.Mode {
+	case ProxyModeAll, ProxyModePartial, ProxyModeOff:
+		return cfg.Mode
+	}
+	if cfg.Enable {
+		return ProxyModeAll
+	}
+	return ProxyModeOff
+}
+
+// MatchURL reports whether rawURL should be proxied in partial mode.
+func (cfg *DownloaderProxyConfig) MatchURL(rawURL string) bool {
+	if cfg == nil {
+		return false
+	}
+	lower := strings.ToLower(rawURL)
+	for _, kw := range cfg.Keywords {
+		kw = strings.ToLower(strings.TrimSpace(kw))
+		if kw == "" {
+			continue
+		}
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveProxy returns the proxy URL for a single request, ignoring the mode.
+func (cfg *DownloaderProxyConfig) resolveProxy() (*url.URL, error) {
+	if cfg.System {
+		safeProxyReloadConf()
+		handler := ieproxy.GetProxyFunc()
+		if handler == nil {
+			return nil, nil
+		}
+		return handler(&http.Request{URL: &url.URL{Scheme: "http", Host: "example.com"}})
+	}
+	if cfg.Scheme == "" || cfg.Host == "" {
+		return nil, nil
+	}
+	return util.BuildProxyUrl(cfg.Scheme, cfg.Host, cfg.Usr, cfg.Pwd), nil
+}
+
+// Resolve decides per request whether the given URL goes through the proxy.
+// It is the entry point used by the HTTP fetcher, so changing the proxy
+// settings takes effect on running tasks without rebuilding their clients.
+func (cfg *DownloaderProxyConfig) Resolve(rawURL string) (*url.URL, error) {
+	switch cfg.EffectiveMode() {
+	case ProxyModeAll:
+		return cfg.resolveProxy()
+	case ProxyModePartial:
+		if !cfg.MatchURL(rawURL) {
+			return nil, nil
+		}
+		return cfg.resolveProxy()
+	}
+	return nil, nil
+}
+
 func (cfg *DownloaderProxyConfig) ToHandler() func(r *http.Request) (*url.URL, error) {
-	if cfg == nil || cfg.Enable == false {
+	if cfg == nil || cfg.EffectiveMode() == ProxyModeOff {
 		return nil
 	}
 	if cfg.System {
@@ -373,7 +495,8 @@ func (cfg *DownloaderProxyConfig) ToHandler() func(r *http.Request) (*url.URL, e
 
 // ToUrl returns the proxy url, just for git clone
 func (cfg *DownloaderProxyConfig) ToUrl() *url.URL {
-	if cfg == nil || cfg.Enable == false {
+	// git clone（扩展安装）只认 all 模式：partial 的关键字表是给下载用的。
+	if cfg == nil || cfg.EffectiveMode() != ProxyModeAll {
 		return nil
 	}
 	if cfg.System {

@@ -17,7 +17,6 @@ require (
 	github.com/matoous/go-nanoid/v2 v2.0.0
 	github.com/mattn/go-ieproxy v0.0.12
 	github.com/mholt/archives v0.1.5
-	github.com/monkeyWie/goed2k v0.0.0-20260317100435-7a7575cf2447
 	github.com/pkg/errors v0.9.1
 	github.com/rs/dnscache v0.0.0-20230804202142-fc85eb664529
 	github.com/rs/zerolog v1.31.0

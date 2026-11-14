@@ -97,15 +97,42 @@ type gConfig struct {
 	AutoTorrent                *gAutoTorrent  `json:"autoTorrent"`
 	Archive                    *gArchive      `json:"archive"`
 	AutoDeleteMissingFileTasks bool           `json:"autoDeleteMissingFileTasks"`
+	// 下面两个是本机补丁加的字段（不是官方 1.9.3 的）。这里必须声明，
+	// 否则 PUT 整份配置时会把它们抹掉。
+	SeedAutoRemove *gSeedAutoRemove `json:"seedAutoRemove"`
+	ResumeOnStart  *bool            `json:"resumeOnStart"`
+	// pathMappings 决定「调用方给的目录 → 本机真实目录」，面板不编辑它，
+	// 但同样必须原样带回去，否则保存设置一次映射就没了。
+	PathMappings []gPathMapping `json:"pathMappings"`
+}
+
+// gPathMapping 是 gopeed 侧的前缀映射，例如 /media → /mnt/nas/media。
+type gPathMapping struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// gSeedAutoRemove 是「做种自动清理」：BT 任务正常下载完成后，分享率达标、
+// 或连续一段时间没有上传字节，就删掉任务记录（force=false，磁盘文件不动）。
+type gSeedAutoRemove struct {
+	Enable      bool    `json:"enable"`
+	Ratio       float64 `json:"ratio"`
+	IdleMinutes int     `json:"idleMinutes"`
 }
 
 type gProxy struct {
-	Enable bool   `json:"enable"`
-	System bool   `json:"system"`
-	Scheme string `json:"scheme"`
-	Host   string `json:"host"`
-	Usr    string `json:"usr"`
-	Pwd    string `json:"pwd"`
+	Enable bool `json:"enable"`
+	// Mode 决定代理的生效范围："off" / "all" / "partial"。
+	// 老配置只写了 enable，读的时候按 enable 推。
+	Mode string `json:"mode"`
+	// Keywords 只在 partial 模式下用：HTTP 请求的网址里含任意一行关键字
+	// （不区分大小写）就走代理，其余直连。BT 永远不走代理。
+	Keywords []string `json:"keywords"`
+	System   bool     `json:"system"`
+	Scheme   string   `json:"scheme"`
+	Host     string   `json:"host"`
+	Usr      string   `json:"usr"`
+	Pwd      string   `json:"pwd"`
 }
 
 type gWebhook struct {
@@ -130,7 +157,7 @@ type gArchive struct {
 	Passwords []string `json:"passwords"`
 }
 
-// 各协议的配置（internal/protocol/{http,bt,ed2k}/config.go）。
+// 各协议的配置（internal/protocol/{http,bt}/config.go）。
 type gHTTPConf struct {
 	UserAgent      string `json:"userAgent"`
 	Connections    int    `json:"connections"`
@@ -143,14 +170,6 @@ type gBTConf struct {
 	SeedKeep   bool     `json:"seedKeep"`
 	SeedRatio  float64  `json:"seedRatio"`
 	SeedTime   int64    `json:"seedTime"`
-}
-
-type gED2KConf struct {
-	ListenPort int    `json:"listenPort"`
-	UDPPort    int    `json:"udpPort"`
-	ServerAddr string `json:"serverAddr"`
-	ServerMet  string `json:"serverMet"`
-	NodesDat   string `json:"nodesDat"`
 }
 
 // proto 把 protocolConfig["name"] 解到 v；不存在或类型不符时返回 false。
@@ -181,12 +200,6 @@ func (c *gConfig) httpConf() gHTTPConf {
 func (c *gConfig) btConf() gBTConf {
 	v := gBTConf{SeedRatio: 1, SeedTime: 7200}
 	c.proto("bt", &v)
-	return v
-}
-
-func (c *gConfig) ed2kConf() gED2KConf {
-	v := gED2KConf{}
-	c.proto("ed2k", &v)
 	return v
 }
 

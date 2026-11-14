@@ -16,7 +16,7 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
-const defaultServer = "http://127.0.0.1:9999"
+const defaultServer = "http://192.0.2.10:9999"
 
 // resolveServer 决定用哪个服务器地址：优先 localStorage 里存的，
 // 否则用页面自身的来源（部署时同源反代 /api，最省心）。
@@ -101,7 +101,7 @@ type app struct {
 	// 设置弹窗
 	booted  bool
 	showSet bool
-	setTab  int  // 0 常规 1 HTTP 2 BT 3 ED2K 4 代理 5 通知 6 连接
+	setTab  int  // 0 常规 1 HTTP 2 BT 3 通知 4 连接
 	setBusy bool // 正在读/写服务器配置
 	setMsg  string
 	srvInfo string // 服务器信息（版本/系统/架构）
@@ -132,20 +132,24 @@ type app struct {
 	fBtKeep     bool
 	fBtTrackers string
 
-	// ED2K
-	fEdPort    string
-	fEdUDP     string
-	fEdServers string
-	fEdMet     string
-	fEdNodes   string
+	// 做种自动清理与启动续传（本机补丁）
+	fSeedClean     bool
+	fSeedRatio     string
+	fSeedIdle      string
+	fResumeOnStart bool
 
-	// 代理
-	fProxyEnable bool
-	fProxySystem bool
-	fProxyScheme string
-	fProxyHost   string
-	fProxyUser   string
-	fProxyPass   string
+	// 面板不编辑的路径映射，保存时原样带回去
+	pathMappings []gPathMapping
+
+	// 代理（界面在 HTTP 页里，不再单独开一个标签页）
+	fProxyAll      bool
+	fProxyPartial  bool
+	fProxyKeywords string
+	fProxySystem   bool
+	fProxyScheme   string
+	fProxyHost     string
+	fProxyUser     string
+	fProxyPass     string
 
 	// 通知与脚本
 	fHookEnable   bool
@@ -797,18 +801,33 @@ func (a *app) loadConfig(cfg *gConfig) {
 	a.fBtKeep = bt.SeedKeep
 	a.fBtTrackers = strings.Join(bt.Trackers, "\n")
 
-	ed := cfg.ed2kConf()
-	a.fEdPort = strconv.Itoa(ed.ListenPort)
-	a.fEdUDP = strconv.Itoa(ed.UDPPort)
-	a.fEdServers = ed.ServerAddr
-	a.fEdMet = ed.ServerMet
-	a.fEdNodes = ed.NodesDat
+	sr := cfg.SeedAutoRemove
+	if sr == nil {
+		sr = &gSeedAutoRemove{}
+	}
+	a.fSeedClean = sr.Enable
+	a.fSeedRatio = trimFloat(sr.Ratio)
+	a.fSeedIdle = strconv.Itoa(sr.IdleMinutes)
+	// 服务端没这个键时默认开启（与补丁的默认值一致）
+	a.fResumeOnStart = cfg.ResumeOnStart == nil || *cfg.ResumeOnStart
+	a.pathMappings = cfg.PathMappings
 
 	px := cfg.Proxy
 	if px == nil {
 		px = &gProxy{}
 	}
-	a.fProxyEnable = px.Enable
+	mode := px.Mode
+	if mode == "" {
+		// 老配置只有 enable
+		if px.Enable {
+			mode = "all"
+		} else {
+			mode = "off"
+		}
+	}
+	a.fProxyAll = mode == "all"
+	a.fProxyPartial = mode == "partial"
+	a.fProxyKeywords = strings.Join(px.Keywords, "\n")
 	a.fProxySystem = px.System
 	a.fProxyScheme = px.Scheme
 	a.fProxyHost = px.Host
@@ -833,11 +852,19 @@ func (a *app) loadConfig(cfg *gConfig) {
 // collectConfig 把表单字段拼成完整配置。PUT /api/v1/config 是整份替换，
 // 所以这里必须把所有字段都填上，漏一个就会把它清空。
 func (a *app) collectConfig() *gConfig {
+	resume := a.fResumeOnStart
 	cfg := &gConfig{
 		DownloadDir:                strings.TrimSpace(a.fDir),
 		MaxRunning:                 atoiOr(a.fMaxText, 5),
 		Extra:                      a.extraCfg,
 		AutoDeleteMissingFileTasks: a.fAutoDelMissing,
+		SeedAutoRemove: &gSeedAutoRemove{
+			Enable:      a.fSeedClean,
+			Ratio:       atofOr(a.fSeedRatio, 0),
+			IdleMinutes: atoiOr(a.fSeedIdle, 0),
+		},
+		ResumeOnStart: &resume,
+		PathMappings:  a.pathMappings,
 		AutoTorrent: &gAutoTorrent{
 			Enable:              a.fTorrent,
 			DeleteAfterDownload: a.fTorrentDel,
@@ -847,14 +874,26 @@ func (a *app) collectConfig() *gConfig {
 			DeleteAfterExtract: a.fExtractDel,
 			Passwords:          splitLines(a.fPwList),
 		},
-		Proxy: &gProxy{
-			Enable: a.fProxyEnable,
-			System: a.fProxySystem,
-			Scheme: strings.TrimSpace(a.fProxyScheme),
-			Host:   strings.TrimSpace(a.fProxyHost),
-			Usr:    a.fProxyUser,
-			Pwd:    a.fProxyPass,
-		},
+		Proxy: func() *gProxy {
+			// 两个开关同时打开时按「部分」处理（更保守，不会把所有流量都塞进代理）
+			mode := "off"
+			switch {
+			case a.fProxyPartial:
+				mode = "partial"
+			case a.fProxyAll:
+				mode = "all"
+			}
+			return &gProxy{
+				Enable:   mode != "off",
+				Mode:     mode,
+				Keywords: splitLines(a.fProxyKeywords),
+				System:   a.fProxySystem,
+				Scheme:   strings.TrimSpace(a.fProxyScheme),
+				Host:     strings.TrimSpace(a.fProxyHost),
+				Usr:      a.fProxyUser,
+				Pwd:      a.fProxyPass,
+			}
+		}(),
 		Webhook: &gWebhook{Enable: a.fHookEnable, URLs: splitLines(a.fHookURLs)},
 		Script:  &gScript{Enable: a.fScriptEnable, Paths: splitLines(a.fScriptPaths)},
 	}
@@ -878,13 +917,6 @@ func (a *app) collectConfig() *gConfig {
 		SeedKeep:   a.fBtKeep,
 		SeedRatio:  atofOr(a.fBtRatio, 1),
 		SeedTime:   int64(atoiOr(a.fBtTime, 7200)),
-	})
-	cfg.setProto("ed2k", gED2KConf{
-		ListenPort: atoiOr(a.fEdPort, 0),
-		UDPPort:    atoiOr(a.fEdUDP, 0),
-		ServerAddr: strings.TrimSpace(a.fEdServers),
-		ServerMet:  strings.TrimSpace(a.fEdMet),
-		NodesDat:   strings.TrimSpace(a.fEdNodes),
 	})
 	return cfg
 }
@@ -938,7 +970,7 @@ func (a *app) reloadConfig(server, token string) {
 func (a *app) newDialog(c *ui.Context, t *ui.Theme) {
 	ui.Modal(c, &a.showNew, func() {
 		ui.Text(c, "新建下载").FontSize(17).Bold()
-		ui.Text(c, "支持 http/https、磁力链、.torrent 链接、ed2k。一行一个，可批量。").FontSize(12).TextColor(t.TextMuted)
+		ui.Text(c, "支持 http/https、磁力链、.torrent 链接。一行一个，可批量。").FontSize(12).TextColor(t.TextMuted)
 		ui.TextArea(c, &a.newLink).Placeholder("https://example.com/file.iso\nmagnet:?xt=urn:btih:…").Height(120).AutoFocus()
 		ui.Text(c, "保存路径（留空用服务器默认目录）").FontSize(12).TextColor(t.TextMuted)
 		ui.TextInput(c, &a.newPath).Placeholder("/downloads")
@@ -996,7 +1028,7 @@ func (a *app) delDialog(c *ui.Context, t *ui.Theme) {
 	})
 }
 
-// detailDialog 是任务详情：把 gopeed 的 meta 与 stats 摊开，BT / HTTP / ED2K 各显示
+// detailDialog 是任务详情：把 gopeed 的 meta 与 stats 摊开，BT / HTTP 各显示
 // 自己那几项关键信息，文件列表单独滚动。
 func (a *app) detailDialog(c *ui.Context, t *ui.Theme) {
 	ui.Modal(c, &a.showDetail, func() {
@@ -1071,8 +1103,6 @@ func (a *app) detailBody(c *ui.Context, t *ui.Theme, d *taskDetail) {
 			case "http":
 				a.kv(c, t, "断点续传", yesNo(taskRange(task)))
 				a.kv(c, t, "连接数", connText(d.Stats))
-			case "ed2k":
-				a.kv(c, t, "源", peersText(d.Stats))
 			}
 			a.kv(c, t, "创建时间", fmtTime(task.CreatedAt))
 			a.kv(c, t, "任务 ID", task.ID)
@@ -1140,7 +1170,7 @@ func (a *app) setDialog(c *ui.Context, t *ui.Theme) {
 					ui.Text(c, a.srvInfo).FontSize(12).TextColor(t.TextMuted)
 				}
 			})
-			ui.Tabs(c, &a.setTab, "常规", "HTTP", "BT", "ED2K", "代理", "通知", "连接")
+			ui.Tabs(c, &a.setTab, "常规", "HTTP", "BT", "通知", "连接")
 			ui.Scroll(c).Height(492).Children(func() {
 				ui.Column(c).Gap(12).Padding(2, 4, 2, 4).Children(func() {
 					switch a.setTab {
@@ -1151,12 +1181,8 @@ func (a *app) setDialog(c *ui.Context, t *ui.Theme) {
 					case 2:
 						a.tabBT(c, t)
 					case 3:
-						a.tabED2K(c, t)
-					case 4:
-						a.tabProxy(c, t)
-					case 5:
 						a.tabNotify(c, t)
-					case 6:
+					case 4:
 						a.tabConn(c, t)
 					}
 				})
@@ -1239,7 +1265,7 @@ func (a *app) tabGeneral(c *ui.Context, t *ui.Theme) {
 		"遇到加密包时按顺序试。zip（含 AES）/ rar / 7z 都支持。", 66, &a.fPwList)
 }
 
-// tabHTTP 是 http/https 协议的参数。
+// tabHTTP 是 http/https 协议的参数，代理也放在这里（只对 HTTP 生效）。
 func (a *app) tabHTTP(c *ui.Context, t *ui.Theme) {
 	ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
 		ui.Column(c).Gap(2).Grow(1).Children(func() {
@@ -1251,6 +1277,26 @@ func (a *app) tabHTTP(c *ui.Context, t *ui.Theme) {
 	a.input(c, t, "User-Agent", "Mozilla/5.0", &a.fHttpUA)
 	a.label(c, t, "有些站点按 UA 拒绝请求，可在这里伪装。")
 	a.toggle(c, t, "使用服务器返回的文件时间", "用 Last-Modified 设置下载文件的 mtime", &a.fHttpCtime)
+
+	ui.Divider(c)
+	ui.Text(c, "代理").FontSize(14).Bold()
+	a.toggle(c, t, "全部下载经代理", "所有 HTTP / HTTPS 下载都走下面的代理", &a.fProxyAll)
+	a.toggle(c, t, "部分下载经代理", "只把网址里含下面关键字的下载交给代理，命中才走、不命中直连", &a.fProxyPartial)
+	a.multiline(c, t, "关键字（一行一个，不区分大小写）", "github.com\npixiv.net", 90, &a.fProxyKeywords)
+	a.label(c, t, "两个开关都关 = 不用代理；都打开时按「部分」算。只看网址里的子串，写 github 会连 raw.githubusercontent.com 一起代理。BT 永远直连，不受这里影响。")
+
+	ui.Divider(c)
+	a.toggle(c, t, "使用系统环境变量里的代理", "读 HTTP_PROXY / HTTPS_PROXY，忽略下面手填的地址", &a.fProxySystem)
+	ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
+		ui.Column(c).Gap(2).Grow(1).Children(func() {
+			ui.Text(c, "代理类型").FontSize(13)
+			ui.Text(c, "http / https / socks5").FontSize(11).TextColor(t.TextMuted)
+		})
+		ui.TextInput(c, &a.fProxyScheme).Placeholder("http").Width(120)
+	})
+	a.input(c, t, "代理地址", "127.0.0.1:7890", &a.fProxyHost)
+	a.input(c, t, "用户名（可选）", "", &a.fProxyUser)
+	a.input(c, t, "密码（可选）", "", &a.fProxyPass)
 }
 
 // tabBT 是 BitTorrent 参数。
@@ -1278,51 +1324,30 @@ func (a *app) tabBT(c *ui.Context, t *ui.Theme) {
 	})
 	a.toggle(c, t, "一直做种不自动停", "忽略上面的分享率与时长，下完继续挂着做种", &a.fBtKeep)
 	ui.Divider(c)
-	a.multiline(c, t, "Tracker 列表（一行一个）", "udp://tracker.opentrackr.org:1337/announce", 90, &a.fBtTrackers)
-}
-
-// tabED2K 是 eD2k / Kademlia 参数。
-func (a *app) tabED2K(c *ui.Context, t *ui.Theme) {
+	a.toggle(c, t, "做种自动清理任务", "下载完成后满足下面的条件就删掉任务记录，磁盘上的文件保留；后台每 10 分钟扫一次", &a.fSeedClean)
 	ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
 		ui.Column(c).Gap(2).Grow(1).Children(func() {
-			ui.Text(c, "eD2k 监听端口").FontSize(13)
-			ui.Text(c, "0 = 随机").FontSize(11).TextColor(t.TextMuted)
+			ui.Text(c, "目标分享率").FontSize(13)
+			ui.Text(c, "上传量 / 下载量 ≥ 该值就清理，0 = 不按分享率判断").FontSize(11).TextColor(t.TextMuted)
 		})
-		ui.TextInput(c, &a.fEdPort).Width(90)
+		ui.TextInput(c, &a.fSeedRatio).Width(90)
 	})
 	ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
 		ui.Column(c).Gap(2).Grow(1).Children(func() {
-			ui.Text(c, "Kad UDP 端口").FontSize(13)
-			ui.Text(c, "0 = 随机").FontSize(11).TextColor(t.TextMuted)
+			ui.Text(c, "无上传清理（分钟）").FontSize(13)
+			ui.Text(c, "连续这么多分钟没有上传字节就清理，0 = 不看空闲；要比 10 分钟明显大才有意义").FontSize(11).TextColor(t.TextMuted)
 		})
-		ui.TextInput(c, &a.fEdUDP).Width(90)
+		ui.TextInput(c, &a.fSeedIdle).Width(90)
 	})
-	a.input(c, t, "eD2k 服务器地址（逗号分隔）", "45.82.80.155:5687,176.123.5.89:4725", &a.fEdServers)
-	a.input(c, t, "server.met 地址", "http://upd.emule-security.org/server.met", &a.fEdMet)
-	a.input(c, t, "nodes.dat 地址", "https://upd.emule-security.org/nodes.dat", &a.fEdNodes)
-}
-
-// tabProxy 是下载代理。
-func (a *app) tabProxy(c *ui.Context, t *ui.Theme) {
-	a.toggle(c, t, "启用下载代理", "打开后所有请求（含 BT tracker）走下面的代理", &a.fProxyEnable)
-	a.toggle(c, t, "使用系统环境变量里的代理", "读 HTTP_PROXY / HTTPS_PROXY，忽略下面手填的地址", &a.fProxySystem)
+	a.toggle(c, t, "重启后自动续传", "gopeed 重启后把上次没下完的任务自动继续；手动暂停的任务不会被拉起", &a.fResumeOnStart)
 	ui.Divider(c)
-	ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
-		ui.Column(c).Gap(2).Grow(1).Children(func() {
-			ui.Text(c, "代理类型").FontSize(13)
-			ui.Text(c, "http / https / socks5").FontSize(11).TextColor(t.TextMuted)
-		})
-		ui.TextInput(c, &a.fProxyScheme).Placeholder("http").Width(120)
-	})
-	a.input(c, t, "代理地址", "127.0.0.1:7890", &a.fProxyHost)
-	a.input(c, t, "用户名（可选）", "", &a.fProxyUser)
-	a.input(c, t, "密码（可选）", "", &a.fProxyPass)
+	a.multiline(c, t, "Tracker 列表（一行一个）", "udp://tracker.opentrackr.org:1337/announce", 90, &a.fBtTrackers)
 }
 
 // tabNotify 是 webhook 与脚本。
 func (a *app) tabNotify(c *ui.Context, t *ui.Theme) {
 	a.toggle(c, t, "启用 Webhook", "任务状态变化时 POST 到下面的地址", &a.fHookEnable)
-	a.multiline(c, t, "Webhook 地址（一行一个）", "http://192.168.50.10:8080/hook", 90, &a.fHookURLs)
+	a.multiline(c, t, "Webhook 地址（一行一个）", "http://192.0.2.10:8080/hook", 90, &a.fHookURLs)
 	ui.Divider(c)
 	a.toggle(c, t, "启用脚本执行", "下载完成后调用指定脚本，路径须在服务器上真实存在", &a.fScriptEnable)
 	a.multiline(c, t, "脚本路径（一行一个）", "/opt/gopeed/hooks/on-done.sh", 90, &a.fScriptPaths)
@@ -1427,15 +1452,13 @@ func human(n int64) string {
 	return fmt.Sprintf("%.1f %s", f, units[i])
 }
 
-// protoColor 给协议徽标上色：BT 紫、HTTP 蓝、ED2K 橙，其余用弱化色。
+// protoColor 给协议徽标上色：BT 紫、HTTP 蓝，其余用弱化色。
 func protoColor(proto string, t *ui.Theme) ui.Color {
 	switch proto {
 	case "bt":
 		return ui.RGBA(140, 110, 245, 1)
 	case "http":
 		return ui.RGBA(70, 150, 245, 1)
-	case "ed2k":
-		return ui.RGBA(210, 145, 55, 1)
 	}
 	return t.TextMuted
 }
@@ -1501,7 +1524,7 @@ func taskHash(task *gTask) string {
 	return strings.ToUpper(task.Meta.Res.Hash)
 }
 
-// peersText 显示「在线节点 / 总节点」；BT 与 ED2K 都只关心这两个数。
+// peersText 显示「在线节点 / 总节点」，BT 只看这两个数。
 func peersText(m map[string]any) string {
 	act, _ := statNum(m, "activePeers")
 	tot, ok := statNum(m, "totalPeers")

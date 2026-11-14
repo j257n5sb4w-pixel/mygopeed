@@ -112,6 +112,10 @@ type Downloader struct {
 	claimedExtractions sync.Map
 
 	extensions []*Extension
+
+	// resumeOnStartIDs holds tasks that were running/queued before this start;
+	// startResumeOnStart continues them once the downloader is up.
+	resumeOnStartIDs []string
 }
 
 func NewDownloader(cfg *DownloaderConfig) *Downloader {
@@ -184,6 +188,9 @@ func (d *Downloader) Setup() error {
 	if tasks == nil {
 		tasks = make([]*Task, 0)
 	} else {
+		// resumeIDs keeps the tasks that were running/queued before the restart;
+		// they all get forced into pause below and are continued a moment later.
+		var resumeIDs []string
 		for i := len(tasks) - 1; i >= 0; i-- {
 			task := tasks[i]
 			// Remove broken tasks
@@ -194,9 +201,13 @@ func (d *Downloader) Setup() error {
 			d.assignFetcherManager(task)
 			initTask(task)
 			if task.Status != base.DownloadStatusDone && task.Status != base.DownloadStatusError {
+				if task.Status == base.DownloadStatusRunning || task.Status == base.DownloadStatusWait {
+					resumeIDs = append(resumeIDs, task.ID)
+				}
 				task.Status = base.DownloadStatusPause
 			}
 		}
+		d.resumeOnStartIDs = resumeIDs
 	}
 	d.tasks = tasks
 	// sort by create time
@@ -216,6 +227,11 @@ func (d *Downloader) Setup() error {
 
 	// Auto-cleanup non-existing tasks on startup
 	d.cleanupNonExistingTasks()
+
+	// Continue the tasks that were interrupted by the restart, and start the
+	// background loop that drops BT tasks which have seeded long enough.
+	d.startResumeOnStart(d.resumeOnStartIDs)
+	d.startSeedAutoRemove()
 
 	// handle upload
 	go func() {
@@ -344,18 +360,30 @@ func (d *Downloader) setupFetcher(fm fetcher.FetcherManager, fetcher fetcher.Fet
 	ctl.GetConfig = func(v any) {
 		d.getProtocolConfig(fm.Name(), v)
 	}
+	// The proxy only exists for HTTP downloads. BT is a swarm protocol and a
+	// single HTTP proxy in front of it only breaks trackers and peer traffic,
+	// so BT (which never uses an HTTP transport) always goes direct.
+	proto := fm.Name()
 	// Get proxy config, task request proxy config has higher priority, then use global proxy config
 	ctl.GetProxy = func(requestProxy *base.RequestProxy) func(*gohttp.Request) (*url.URL, error) {
-		if requestProxy == nil {
-			return d.cfg.Proxy.ToHandler()
-		}
-		switch requestProxy.Mode {
-		case base.RequestProxyModeNone:
+		if proto != "http" {
 			return nil
-		case base.RequestProxyModeCustom:
-			return requestProxy.ToHandler()
-		default:
-			return d.cfg.Proxy.ToHandler()
+		}
+		if requestProxy != nil {
+			switch requestProxy.Mode {
+			case base.RequestProxyModeNone:
+				return nil
+			case base.RequestProxyModeCustom:
+				return requestProxy.ToHandler()
+			}
+		}
+		// Resolve per request (not per client) so that switching the mode or
+		// editing the keyword list applies to running tasks immediately.
+		return func(r *gohttp.Request) (*url.URL, error) {
+			if r == nil || r.URL == nil {
+				return nil, nil
+			}
+			return d.cfg.Proxy.Resolve(r.URL.String())
 		}
 	}
 	fetcher.Setup(ctl)

@@ -1181,12 +1181,10 @@ func TestDownloader_AutoExtractWithDeleteAfterExtract(t *testing.T) {
 		t.Log("Extraction timed out")
 	}
 
-	// Give time for file deletion
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify archive was deleted
+	// The archive is removed asynchronously, `archiveDeleteDelay` after the
+	// extraction finished, so poll instead of checking immediately.
 	archivePath := downloadDir + "/archive.zip"
-	if _, err := os.Stat(archivePath); !os.IsNotExist(err) {
+	if !waitFileGone(t, archivePath, archiveDeleteDelay+5*time.Second) {
 		t.Error("Expected archive to be deleted after extraction")
 	}
 
@@ -2082,11 +2080,12 @@ func TestDownloader_HandleExtractionResult_WithDelete(t *testing.T) {
 		t.Errorf("ExtractStatus = %v, want %v", task.Progress.ExtractStatus, ExtractStatusDone)
 	}
 
-	// Archives should be deleted
-	if _, err := os.Stat(archivePath1); !os.IsNotExist(err) {
+	// Deletion is delayed and asynchronous, so poll for it.
+	timeout := archiveDeleteDelay + 5*time.Second
+	if !waitFileGone(t, archivePath1, timeout) {
 		t.Error("Archive 1 should be deleted when deleteAfterExtract=true")
 	}
-	if _, err := os.Stat(archivePath2); !os.IsNotExist(err) {
+	if !waitFileGone(t, archivePath2, timeout) {
 		t.Error("Archive 2 should be deleted when deleteAfterExtract=true")
 	}
 }
@@ -2730,5 +2729,20 @@ func TestDownloader_PatchTask_NotFound(t *testing.T) {
 	err := downloader.Patch("non-existent-id", patchReq, nil)
 	if err != ErrTaskNotFound {
 		t.Errorf("Patch() error = %v, want %v", err, ErrTaskNotFound)
+	}
+}
+
+// waitFileGone polls path until it no longer exists, or timeout expires.
+func waitFileGone(t *testing.T, path string, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

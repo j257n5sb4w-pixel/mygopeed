@@ -164,6 +164,28 @@ func TestDownloaderStoreConfig_Init(t *testing.T) {
 				AutoTorrent:    tt.fields.AutoTorrent,
 				Archive:        tt.fields.Archive,
 			}
+			// Local patches (pathMappings / seedAutoRemove / resumeOnStart) make
+			// Init() fill in three more fields; the table above only lists what
+			// each case is actually about.
+			tt.want.PathMappings = []PathMapping{}
+			tt.want.SeedAutoRemove = &SeedAutoRemoveConfig{}
+			defResume := true
+			tt.want.ResumeOnStart = &defResume
+			// Init() also normalises the proxy mode and the keyword slice.
+			if tt.want.Proxy == nil {
+				tt.want.Proxy = &DownloaderProxyConfig{}
+			}
+			if tt.want.Proxy.EffectiveMode() == ProxyModeOff {
+				tt.want.Proxy.Mode = ProxyModeOff
+				tt.want.Proxy.Enable = false
+			} else {
+				tt.want.Proxy.Mode = tt.want.Proxy.EffectiveMode()
+				tt.want.Proxy.Enable = true
+			}
+			if tt.want.Proxy.Keywords == nil {
+				tt.want.Proxy.Keywords = []string{}
+			}
+
 			if got := cfg.Init(); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("Init() = %v, want %v", got, tt.want)
 			}
