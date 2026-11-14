@@ -160,7 +160,23 @@ type app struct {
 	win *mygo.Window
 }
 
-func (a *app) onMain(fn func()) { mygo.RunOnMain(fn) }
+// post 把 fn 投回主线程执行，不等它跑完。
+//
+// 之前这里用的是 mygo.RunOnMain：它在非主线程上 post 之后会阻塞等 <-done。
+// 实测这条路径不可靠 —— 设置弹窗开着的时候，goroutine 里的回调经常永远不执行，
+// 于是「设置」一直停在「正在读取服务器配置…」、保存按钮一直灰着「处理中…」，
+// 点保存也没反应（saveSettings 见 setBusy 为真就直接 return）。
+//
+// Window.Update 走 postMain 投递后立刻返回，由主线程执行 fn 并按需重建内容，
+// 是 MyGo 文档里给 goroutine 改界面状态推荐的写法，不会把后台 goroutine 卡住。
+func (a *app) post(fn func()) {
+	if a.win != nil {
+		a.win.Update(fn)
+		return
+	}
+	// 窗口还没建好（启动瞬间）：没有界面可刷，直接改状态即可。
+	fn()
+}
 
 // firstPaint 在第一次拿到数据（成功或失败）后隐藏页面加载遮罩，只做一次。
 func (a *app) firstPaint() {
@@ -179,7 +195,7 @@ func (a *app) refresh(silent bool) {
 	ts, err := cli.tasks()
 	if err != nil {
 		unauthorized := errors.Is(err, errUnauthorized)
-		a.onMain(func() {
+		a.post(func() {
 			a.ok = false
 			if unauthorized {
 				// 面板设了访问密码，切到登录页，别显示成「连不上」
@@ -249,7 +265,7 @@ func (a *app) refresh(silent bool) {
 		return views[i].Name < views[j].Name
 	})
 
-	a.onMain(func() {
+	a.post(func() {
 		a.tasks = views
 		a.loaded = true
 		a.ok = true
@@ -449,7 +465,7 @@ func (a *app) doLogin() {
 		panelKey = key
 		cli := newClient(a.server, a.token)
 		info, err := cli.info()
-		a.onMain(func() {
+		a.post(func() {
 			a.loggingIn = false
 			if err != nil {
 				panelKey = old
@@ -564,7 +580,7 @@ func (a *app) visible() []TaskView {
 // ---------- 动作 ----------
 
 func (a *app) toastOn(s string) {
-	a.onMain(func() {
+	a.post(func() {
 		a.toast = s
 		if a.win != nil {
 			a.win.Invalidate()
@@ -644,7 +660,7 @@ func (a *app) loadDetailAsync() {
 				d.Stats = st
 			}
 		}
-		a.onMain(func() {
+		a.post(func() {
 			if a.detailID != id {
 				return
 			}
@@ -706,7 +722,7 @@ func (a *app) create() {
 				n++
 			}
 		}
-		a.onMain(func() {
+		a.post(func() {
 			a.creating = false
 			a.newLink = ""
 		})
@@ -727,28 +743,22 @@ func (a *app) openNew() {
 	}
 }
 
+// openSettings 打开设置弹窗。
+//
+// 这里刻意做成纯同步：配置在启动时（primeConfig）和每次保存后都已经读到
+// 内存里了，表单字段随时是新鲜的，打开弹窗不需要再发请求。
+//
+// 为什么不能「先打开弹窗、再异步取数」：ui.Modal 开着时 MyGo 跑的是它自己的
+// 嵌套循环，别的 goroutine 投回主线程的函数处理不到，于是弹窗会永远停在
+// 「处理中…」、保存按钮一直是灰的。
 func (a *app) openSettings() {
+	a.setMsg = ""
+	a.setBusy = false
+	a.toast = ""
 	a.showSet = true
-	a.setMsg = "正在读取服务器配置…"
-	a.setBusy = true
-	server, token := a.server, a.token
-	go func() {
-		cli := newClient(server, token)
-		cfg, err := cli.config()
-		info, ierr := cli.info()
-		a.onMain(func() {
-			a.setBusy = false
-			if ierr == nil {
-				a.srvInfo = info
-			}
-			if err != nil {
-				a.setMsg = "读取配置失败：" + err.Error()
-				return
-			}
-			a.setMsg = ""
-			a.loadConfig(cfg)
-		})
-	}()
+	if a.win != nil {
+		a.win.Invalidate()
+	}
 }
 
 // primeConfig 在启动时静默读一次服务器配置，只为了让「新建任务」的保存路径
@@ -758,11 +768,12 @@ func (a *app) primeConfig() {
 	if err != nil {
 		return
 	}
-	a.onMain(func() {
+	a.post(func() {
 		if a.showSet {
 			return // 用户已经打开设置，别抢他的编辑
 		}
 		a.loadConfig(cfg)
+		a.invalidate()
 	})
 }
 
@@ -921,6 +932,10 @@ func (a *app) collectConfig() *gConfig {
 	return cfg
 }
 
+// saveSettings 保存设置：先收起弹窗、后台写回，成功了再带着新配置重新弹。
+//
+// 必须在保存期间关掉弹窗 —— ui.Modal 开着时主线程在它自己的嵌套循环里，
+// 回调投不进来，弹窗就会一直停在「处理中…」。收起弹窗后先给一条 toast 提示。
 func (a *app) saveSettings() {
 	if a.setBusy {
 		return
@@ -931,21 +946,32 @@ func (a *app) saveSettings() {
 	server, token := a.server, a.token
 	payload := a.collectConfig()
 	a.setBusy = true
-	a.setMsg = "正在保存…"
+	a.showSet = false
+	a.toastOn("正在保存设置…")
+	a.invalidate()
 	go func() {
 		err := newClient(server, token).putConfig(payload)
-		a.onMain(func() {
+		var cfg *gConfig
+		if err == nil {
+			// 服务器会做范围校验（比如并发数），回读一遍拿真实值
+			cfg, _ = newClient(server, token).config()
+		}
+		a.post(func() {
 			a.setBusy = false
 			if err != nil {
 				a.setMsg = "保存失败：" + err.Error()
 				a.toastOn("保存失败：" + err.Error())
+				a.invalidate()
 				return
+			}
+			if cfg != nil {
+				a.loadConfig(cfg)
 			}
 			a.setMsg = "已保存"
 			a.toastOn("设置已保存")
-			// 服务器会做范围校验（比如并发数），重新读一遍以显示真实值
+			a.showSet = true
+			a.invalidate()
 			a.refresh(true)
-			a.reloadConfig(server, token)
 		})
 	}()
 }
@@ -957,7 +983,7 @@ func (a *app) reloadConfig(server, token string) {
 		if err != nil {
 			return
 		}
-		a.onMain(func() {
+		a.post(func() {
 			if a.showSet {
 				a.loadConfig(cfg)
 			}
@@ -1222,8 +1248,52 @@ func (a *app) toggle(c *ui.Context, t *ui.Theme, title, hint string, v *bool) {
 				ui.Text(c, hint).FontSize(11).TextColor(t.TextMuted)
 			}
 		})
-		ui.Switch(c, v).Label(title)
+		a.switchBox(c, t, title, v)
 	})
+}
+
+// switchBox 是自己画的开关，代替 ui.Switch。
+//
+// MyGo 的 ui.Switch 用 Animate("knob", …) 决定旋钮位置，而动画通道挂在
+// 元素 id 上、跨帧复用：设置弹窗里这一行每次重建都可能拿到上一帧残留的
+// 通道（值为 0），于是即便绑定变量已经是 true，旋钮也停在左边、轨道还是灰的
+// ——服务端配置开着、界面显示关，就是这个原因。
+//
+// 这里完全按 *v 算位置和颜色，不参与任何动画，重建多少次都所见即所得。
+func (a *app) switchBox(c *ui.Context, t *ui.Theme, label string, v *bool) {
+	// 轨道用 Animate 一帧到位之外的办法：这里只在 build 时定一次颜色，
+	// 但旋钮位置在 Draw 里按当时的 *v 现算 —— Draw 每帧都跑，所以即便
+	// 设置弹窗的内容没有因为 loadConfig 而重建，画面也是对的。
+	offTrack := t.Border.Mix(t.Text, 0.15)
+	if *v {
+		offTrack = t.Accent
+	}
+	ui.Row(c).
+		Width(36).
+		Height(20).
+		Radius(10).
+		Background(offTrack).
+		Cursor(ui.CursorPointer).
+		Label(label).
+		OnClick(func() {
+			*v = !*v
+			a.invalidate()
+		}).
+		Draw(func(p *ui.Painter, r ui.Rect) {
+			// 位置和轨道色都按最新的 *v 现算，不吃 build 时的快照。
+			on := *v
+			d := r.H - 4
+			x := r.X + 2
+			if on {
+				x = r.X + r.W - d - 2
+				p.Fill(r, t.Accent, r.H/2)
+			} else {
+				p.Fill(r, t.Border.Mix(t.Text, 0.15), r.H/2)
+			}
+			knob := ui.Rect{X: x, Y: r.Y + 2, W: d, H: d}
+			p.Shadow(knob, d/2, 0, 1, 3, 0, ui.RGBA(0, 0, 0, 0.25))
+			p.Fill(knob, ui.RGB(255, 255, 255), d/2)
+		})
 }
 
 // input 是「标题 + 单行输入框」，label 在上、框在下。

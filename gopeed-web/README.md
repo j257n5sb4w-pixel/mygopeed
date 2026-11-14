@@ -105,7 +105,7 @@ data URI，原样铺出来没法看。文件列表超过 200 条只列前 200 �
 ## 目录结构
 
 ```
-gopeed-web/
+D:\DSH\_mygo\gopeed-web\
 ├── main.go        状态机、视图（header/toolbar/body/row）、弹窗、轮询
 ├── client.go      gopeed REST 客户端（同构结构体 + 请求封装）
 ├── boot.go        js/wasm 专用：隐藏加载遮罩、localStorage、页面 origin
@@ -122,11 +122,11 @@ gopeed-web/
 必须用 **pwsh**（bash 下 Go 会因命名管道受限失败），并且重设 `TMP`/`TEMP`：
 
 ```powershell
-cd gopeed-web
-$env:Path = "<go-bin>;" + $env:Path
-$env:GOPATH = "<gopath>"; $env:GOCACHE = "<gocache>"
+cd D:\DSH\_mygo\gopeed-web
+$env:Path = "D:\DSH\.tools\go1.27.3\go\bin;" + $env:Path
+$env:GOPATH = "D:\DSH\_work\gopath"; $env:GOCACHE = "D:\DSH\_work\gocache"
 $env:GOPROXY = "https://goproxy.cn,direct"; $env:GOSUMDB = "off"; $env:GOFLAGS = "-mod=mod"
-$env:TMP = "<tmp>"; $env:TEMP = "<tmp>"
+$env:TMP = "D:\DSH\_work\tmp"; $env:TEMP = "D:\DSH\_work\tmp"
 $env:GOOS = "js"; $env:GOARCH = "wasm"
 
 go vet ./...
@@ -177,7 +177,7 @@ Caddy 配置要点：
 - **不勾选**「同时删除已下载的本地文件」→ 只删任务记录，磁盘上的文件保留（`DELETE /tasks/{id}`）。
 - **勾选** → 连文件一起删（`DELETE /tasks/{id}?force=true`），勾上后文案变红、按钮变红并改成「删除任务和文件」。
 
-「下载后重命名」现在由 gopeed 服务端自己完成（详见 `gopeed-patched/README.md`）：
+「下载后重命名」现在由 gopeed 服务端自己完成（详见 `_mygo/gopeed-patched/README.md`）：
 改名成功后它会把任务记录里的名字一起改掉，所以 `force=true` 删到的就是改名后那份文件，
 **面板不需要再额外补删一次**（以前要调 `gopeed-push` 的 `/cleanup`，那个网关已经拆了）。
 
@@ -244,7 +244,7 @@ anime-go
 
 以前这里是个独立的 `gopeed-push` 网关（8091 端口），因为 gopeed 缺三件事：
 下载完成后改名、按映射表改写目录、删任务时删到改名后的文件。这三件事现在都做进了
-gopeed 本体（补丁与说明见 `gopeed-patched/README.md`），网关已拆除，**8091 端口不再监听**。
+gopeed 本体（补丁与说明见 `_mygo/gopeed-patched/README.md`），网关已拆除，**8091 端口不再监听**。
 
 调用方直接打 gopeed 的 REST 就行，认证用 `X-Api-Token: <your-gopeed-api-token>`：
 
@@ -306,7 +306,7 @@ curl -X DELETE "http://127.0.0.1:9999/api/v1/tasks/<任务ID>?force=true"   -H '
 | 内存 | Orange Pi Zero 3 只有 969 MB，`gopeed.service` 有 `MemoryMax=400M`。同时下大 BT 任务容易触发 OOM（实测 756 MB 的 Debian ISO 跑到 59 MB 时被 OOM killer 杀过一次，`Restart=on-failure` 自动拉起） |
 | 浏览器不支持 | 原生菜单栏、托盘、系统通知、全局快捷键、文件对话框（这些是桌面版能力） |
 | 不能改任务名 | gopeed 的 `PATCH /tasks/{id}` 不改 `Task.Name`，UI 里没做改名 |
-| 重启不续传 | gopeed 启动时把非 `done`/`error` 的任务置为 `pause`，需要手动点继续 |
+| 重启后是否续传 | 原生 gopeed 启动时把非 `done`/`error` 的任务置为 `pause`，要手动点继续；本仓库的 gopeed 补丁加了 `resumeOnStart`（默认开），在面板 BT 页可关 |
 | 进度分母 | 用 `meta.res.size`；`progress.used` 是**耗时纳秒**不是字节数，不能拿来算百分比 |
 
 ## gopeed API 的坑（编码时踩过的）
@@ -319,6 +319,32 @@ curl -X DELETE "http://127.0.0.1:9999/api/v1/tasks/<任务ID>?force=true"   -H '
 6. 磁力链 `resolve` 可能超过 30 秒，客户端对 resolve 用 120 秒超时的连接。
 7. `DELETE /tasks/{id}?force=true` 才会连文件一起删。
 8. BT 任务 force 删除偶发 nil pointer panic（`internal/protocol/bt/fetcher.go:146`），任务仍会被删掉。
+
+## MyGo 的坑（编码时踩过的）
+
+MyGo 是立即模式 UI（Go → WebAssembly，canvas 绘制），有两处行为会直接吃掉功能，改界面前先看这里。
+
+**1. `ui.Switch` 的旋钮位置来自动画通道，跨重建会复用**
+
+`ui.Switch` 内部是 `pos := sw.Animate("knob", b2f(*v), 140*time.Millisecond)`，动画通道挂在按元素 id 复用的 node state 上。设置弹窗每次重建，同一个开关会拿到上一帧残留的通道（值 0），于是**绑定变量已经是 true，旋钮还停在左边、轨道还是灰的**——服务端配置开着、界面显示关，就是这个原因。DEBUG 打印能证明字段值是对的，所以很容易查错方向。
+
+本面板不再用 `ui.Switch`，改成自己画的 `switchBox`：`Draw` 回调每帧按 `*v` 现算旋钮位置和轨道色，不参与任何动画。
+
+**2. Modal 打开后，别的 goroutine 投回主线程的函数不会被处理**
+
+`ui.Modal` 打开时 MyGo 跑的是它自己的嵌套事件循环，`mygo.RunOnMain` / `Window.Update` 投递的闭包在此期间不会被执行（wasm 单线程，新起的 goroutine 也没有调度机会）。所以「先弹窗、再异步取配置」在 wasm 里必然卡死——弹窗永远显示「正在读取服务器配置…」、保存按钮灰着「处理中…」，点保存也没反应。
+
+本面板的约束是：**弹窗必须在数据就绪后同步打开**。设置项在启动（`primeConfig`）和每次保存成功后都已经读进内存，`openSettings()` 只负责置标志位；保存时先关弹窗、再异步 `PUT`，成功后回填并提示。
+
+顺带一提，goroutine 改界面状态统一用非阻塞的 `a.post(fn)`（内部 `Window.Update`），不要用会阻塞等返回的 `mygo.RunOnMain`。
+
+**3. 后台标签页不重绘**
+
+`internal/web/surface.go` 的 `RequestFrame()` 用 `requestAnimationFrame` 排帧，标签页在后台时浏览器不给回调，`pending` 卡在 true，之后所有重绘请求都被丢弃——表现为「切回来画面还是旧的，随便点一下就全好了」。调试时先 `tab_focus` 或开个新标签页，别把它当成代码 bug。
+
+**4. 构建不要加 `-trimpath`**
+
+加了之后面板会永久停在「正在加载…」（wasm 里的路径信息影响启动阶段的资源解析）。`GOOS=js GOARCH=wasm go build -o app.wasm .` 即可。
 
 ## 验证记录
 
