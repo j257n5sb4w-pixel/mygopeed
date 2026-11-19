@@ -1,0 +1,41 @@
+# 只把构建用的东西送进 daemon，其余全部排除，避免 20MB wasm 之外的杂项拖慢构建
+.git
+.gitignore
+.github
+
+# 与镜像无关的目录
+gopeed-push/
+gopeed-patched/local-patches.patch
+gopeed-patched/README.md
+gopeed-web/*.go
+gopeed-web/go.mod
+gopeed-web/go.sum
+gopeed-web/README.md
+gopeed-web/caddy-gopeed.conf
+
+# 但要用到 gopeed-web/web 下的构建产物，重新放行
+!gopeed-web/web
+!gopeed-web/web/**
+
+# 后端源码里的构建垃圾
+gopeed-patched/gd/.git
+gopeed-patched/gd/dist
+gopeed-patched/gd/bin
+gopeed-patched/gd/storage
+gopeed-patched/gd/Downloads
+gopeed-patched/gd/cmd/web/dist
+gopeed-patched/gd/ui
+gopeed-patched/gd/_docs
+gopeed-patched/gd/_examples
+**/*.data
+**/*.log
+**/*.exe
+
+# 交付文件本身不进构建上下文
+# 注意：docker/ 必须留在上下文里，Dockerfile 要 COPY docker/config.json 等三份文件
+docker-compose.yml
+docker-compose.nas.yaml
+Dockerfile
+.dockerignore
+README.md
+LICENSE

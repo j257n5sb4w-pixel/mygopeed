@@ -1,0 +1,81 @@
+# mygopeed / docker-compose.nas.yaml
+#
+# 面向「装了 UGOS 的绿联 NAS」的变体。与 docker-compose.yml 的差别只有三处，
+# 都是被 NAS 环境逼出来的，不是选择：
+#
+#   1. network_mode: host —— UGOS 把 net.ipv4.ip_forward 设成 0，
+#      docker 的 bridge 网络（172.17.0.0/16）完全没有出网能力：容器里连
+#      8.8.8.8:53 都超时，apk / apt / Go module 全挂。/volume1/docker 下
+#      已有的 ddns-go、v2raya 也都用 host 网络。副作用是无需 ports: 映射，
+#      监听即对外，BT 的 TCP+UDP 一并可用。
+#      build.network: host 同理，否则构建期拉包一样失败。
+#
+#   2. API_PORT 改用 19999 —— 宿主 9999 被 UGOS 自带 nginx 长期占用
+#      （`ss -lntp | grep 9999` 可见），host 网络下会直接撞端口。
+#
+#   3. 构建走国内源 —— Docker Hub / proxy.golang.org / dl-cdn.alpinelinux.org
+#      在这类环境里通常不可达或 DNS 抖动。
+#
+# 用法：
+#   把本文件改名为 compose.yaml 放进 /volume1/docker/mygopeed/，然后
+#   sudo docker compose up -d --build
+
+services:
+  mygopeed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # 见文件头第 1 条：bridge 无出网能力，构建期必须走宿主网络
+      network: host
+      args:
+        VERSION: 1.9.3-my
+        GOPROXY: https://goproxy.cn,direct
+        GO_IMAGE: docker.m.daocloud.io/library/golang:1.24.11-alpine3.23
+        RUNTIME_IMAGE: docker.m.daocloud.io/library/alpine:3.23
+        # 官方 apk 源在部分网络下 DNS 抖动；留空则用官方源
+        APK_MIRROR: mirrors.aliyun.com
+    image: mygopeed:1.9.3-my
+    container_name: mygopeed
+
+    restart: unless-stopped
+
+    network_mode: host
+
+    environment:
+      TZ: Asia/Shanghai
+      GOMEMLIMIT: 800MiB
+      # 与 NAS 上的普通用户对齐（通常是 1000:10 或 1000:1000），
+      # 让容器写出的文件在 NAS 文件管理器里归自己而不是 root
+      PUID: "1000"
+      PGID: "1000"
+      UMASK: "022"
+
+      PANEL_PORT: "8090"
+      PANEL_USER: gopeed
+      PANEL_PASS: "change-me"      # 改成自己的口令，或留空让容器随机生成并打印到日志
+      PANEL_AUTH: "on"
+
+      # 19999 而不是 9999，见文件头第 2 条
+      API_PORT: "19999"
+      BT_LISTEN_PORT: "51413"
+
+      DOWNLOAD_DIR: /downloads
+      MAX_RUNNING: "5"
+
+    volumes:
+      - ./config:/app/storage
+      # 宿主路径按自己 NAS 的实际目录改
+      - /volume1/dl:/downloads
+      - /volume1/media:/media
+
+    mem_limit: 1g
+    memswap_limit: 1g
+
+    stop_grace_period: 30s
+
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8090/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

@@ -1,0 +1,53 @@
+# 由 entrypoint.sh 从本模板生成 /app/etc/Caddyfile
+# 三种占位标记由 entrypoint 的 awk 替换：面板端口、API 端口、鉴权段落
+# 注意：本文件任何注释里都不要再出现那三个下划线包裹的标记原文，
+#       否则 awk 会连注释一起替换（曾经因此把鉴权块吐到全局作用域，Caddy 直接启动失败）
+#
+# 设计要点：
+#  - 8090 是唯一对外端口，静态面板与 /api 同源，面板 resolveServer() 取 location.origin 就够用
+#  - 后端只监听 127.0.0.1:9999，不开 ApiToken（开了会连静态页一起 401）
+#  - /api/* 的鉴权在这里做：校验 X-Panel-Key == base64(用户名:密码)，与面板 doLogin() 的算法一致
+#  - 不用 HTTP Basic 是因为 401 带 WWW-Authenticate 会弹浏览器原生登录框
+{
+	admin off
+	auto_https off
+}
+
+:__PANEL_PORT__ {
+	header {
+		X-Content-Type-Options nosniff
+		-Server
+	}
+
+	# 面板每次发版靠 ?v= 破缓存，wasm 本身不缓存
+	@wasm path /app.wasm
+	header @wasm {
+		Cache-Control "no-cache"
+		Content-Type "application/wasm"
+	}
+
+	# 沙箱跨站复用防护，面板不需要被别的站嵌入
+	header X-Frame-Options "SAMEORIGIN"
+
+	handle /api/* {
+__AUTH_BLOCK__
+		reverse_proxy 127.0.0.1:__API_PORT__ {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# /fs/tasks、/fs/extensions 走同一个后端（面板目前只用 /api/v1/*，留着不影响）
+	handle /fs/* {
+__AUTH_BLOCK__
+		reverse_proxy 127.0.0.1:__API_PORT__
+	}
+
+	handle {
+		root * /srv/gopeed-web
+		# 仓库里已带 app.wasm.gz / index.html.gz / wasm_exec.js.gz，
+		# 用预压缩文件省掉运行时 gzip（也避免 Caddy 再压一遍 20MB wasm）
+		file_server {
+			precompressed gzip
+		}
+	}
+}

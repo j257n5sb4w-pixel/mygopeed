@@ -1,0 +1,15 @@
+# 容器里执行/解析的文件必须保持 LF。
+# 本机 core.autocrlf=true 时 git 会把 .sh 转成 CRLF，
+# 在 Alpine 上表现为 "#!/bin/sh^M: bad interpreter" 或 entrypoint 起不来。
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+*.tmpl          text eol=lf
+/docker/*.json  text eol=lf
+*.yml           text eol=lf
+*.yaml           text eol=lf
+.dockerignore   text eol=lf
+.gitattributes  text eol=lf
+
+# wasm 产物是二进制，别让 git 做换行转换或 diff
+*.wasm          binary
+*.wasm.gz       binary

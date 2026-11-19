@@ -1,0 +1,53 @@
+{
+  "downloadDir": "/downloads",
+  "maxRunning": 3,
+  "protocolConfig": {
+    "http": {
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
+      "connections": 16,
+      "useServerCtime": false
+    },
+    "bt": {
+      "listenPort": __BT_LISTEN_PORT__,
+      "trackers": [],
+      "seedKeep": false,
+      "seedRatio": 1.0,
+      "seedTime": 7200
+    }
+  },
+  "proxy": {
+    "enable": false,
+    "mode": "off",
+    "keywords": [],
+    "system": false,
+    "scheme": "",
+    "host": "",
+    "usr": "",
+    "pwd": ""
+  },
+  "webhook": {
+    "enable": false,
+    "urls": []
+  },
+  "script": {
+    "enable": false,
+    "paths": []
+  },
+  "autoTorrent": {
+    "enable": false,
+    "deleteAfterDownload": false
+  },
+  "archive": {
+    "autoExtract": false,
+    "deleteAfterExtract": false,
+    "passwords": []
+  },
+  "autoDeleteMissingFileTasks": false,
+  "pathMappings": [],
+  "seedAutoRemove": {
+    "enable": false,
+    "ratio": 0,
+    "idleMinutes": 0
+  },
+  "resumeOnStart": true
+}
