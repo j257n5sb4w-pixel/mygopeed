@@ -32,10 +32,10 @@ gopeed-patched/gd/_examples
 **/*.exe
 
 # 交付文件本身不进构建上下文
-# 注意：docker/ 必须留在上下文里，Dockerfile 要 COPY docker/config.json 等三份文件
+# 注意：docker/ 必须留在上下文里，Dockerfile 要 COPY docker/config.json 与 docker/entrypoint.sh
 docker-compose.yml
 docker-compose.nas.yaml
+README.md
+README-NAS.md
 Dockerfile
 .dockerignore
-README.md
-LICENSE

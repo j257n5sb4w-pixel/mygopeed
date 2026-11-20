@@ -148,6 +148,13 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 
 	enableApiToken := startCfg.ApiToken != ""
 	enableWebAuth := startCfg.WebEnable && startCfg.WebAuth != nil
+	// panelKey 是内嵌面板（mygopeed wasm）在 X-Panel-Key 头里携带的口令，
+	// 等于 base64(username + ":" + password)，与面板 doLogin() 的计算方式一致。
+	// 有了它，面板不用 Caddy 之类的反代也能直接登录同一个端口上的后端。
+	panelKey := ""
+	if enableWebAuth {
+		panelKey = base64.StdEncoding.EncodeToString([]byte(startCfg.WebAuth.Username + ":" + startCfg.WebAuth.Password))
+	}
 	if startCfg.WebEnable {
 		if enableWebAuth {
 			r.Methods(http.MethodPost).Path("/api/web/login").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -172,7 +179,7 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 		}
 		r.PathPrefix("/fs/tasks").Handler(http.FileServer(new(taskFileSystem)))
 		r.PathPrefix("/fs/extensions").Handler(http.FileServer(new(extensionFileSystem)))
-		r.PathPrefix("/").Handler(gzipMiddleware(http.FileServer(newEmbedCacheFileSystem(http.FS(startCfg.WebFS)))))
+		r.PathPrefix("/").Handler(newWebStaticHandler(startCfg.WebFS))
 	}
 	if enableApiToken || enableWebAuth {
 		writeUnauthorized := func(w http.ResponseWriter, r *http.Request) {
@@ -196,7 +203,16 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 				}
 
 				if enableWebAuth {
+					// 非 API 路径是内嵌面板的静态资源（index.html / app.wasm / wasm_exec.js），
+					// 浏览器加载它们时不会带任何凭据，必须无条件放行，否则首页直接 401。
 					if !strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api/web/login" {
+						h.ServeHTTP(w, r)
+						return
+					}
+
+					// 内嵌面板用 X-Panel-Key 携带 base64(user:pass)，直接在这里校验，
+					// 不再依赖外层反代。校验通过后交给下游处理，无需 Bearer token。
+					if panelKey != "" && r.Header.Get("X-Panel-Key") == panelKey {
 						h.ServeHTTP(w, r)
 						return
 					}
@@ -252,7 +268,7 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 	})
 
 	srv = &http.Server{Handler: handlers.CORS(
-		handlers.AllowedHeaders([]string{"Content-Type", "Authorization", "X-Api-Token", "X-Target-Uri"}),
+		handlers.AllowedHeaders([]string{"Content-Type", "Authorization", "X-Api-Token", "X-Panel-Key", "X-Target-Uri"}),
 		handlers.AllowedMethods([]string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}),
 		handlers.AllowedOrigins([]string{"*"}),
 		handlers.AllowCredentials(),

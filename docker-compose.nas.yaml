@@ -1,38 +1,49 @@
-# mygopeed / docker-compose.nas.yaml
+# mygopeed on UGREEN NAS
 #
-# 面向「装了 UGOS 的绿联 NAS」的变体。与 docker-compose.yml 的差别只有三处，
-# 都是被 NAS 环境逼出来的，不是选择：
+# 面板已经 //go:embed 进 gopeed 二进制，UI 与 REST API 共用同一个端口，
+# 容器里只有一个进程，不需要 Caddy，也不需要第二个端口。
 #
-#   1. network_mode: host —— UGOS 把 net.ipv4.ip_forward 设成 0，
-#      docker 的 bridge 网络（172.17.0.0/16）完全没有出网能力：容器里连
-#      8.8.8.8:53 都超时，apk / apt / Go module 全挂。/volume1/docker 下
-#      已有的 ddns-go、v2raya 也都用 host 网络。副作用是无需 ports: 映射，
-#      监听即对外，BT 的 TCP+UDP 一并可用。
-#      build.network: host 同理，否则构建期拉包一样失败。
+# 目录布局与 /volume1/docker/ 下已有项目一致：
+#   /volume1/docker/mygopeed/
+#   ├── compose.yaml      ← 本文件
+#   ├── Dockerfile
+#   ├── .dockerignore
+#   ├── docker/            ← entrypoint.sh / config.json
+#   ├── config/            ← 持久化：gopeed.db 任务库 + logs
+#   ├── gopeed-patched/gd/ ← 后端源码（构建用）
+#   └── gopeed-web/web/    ← 面板静态产物（构建用）
 #
-#   2. API_PORT 改用 19999 —— 宿主 9999 被 UGOS 自带 nginx 长期占用
-#      （`ss -lntp | grep 9999` 可见），host 网络下会直接撞端口。
+# 构建 + 启动：
+#   cd /volume1/docker/mygopeed && sudo docker compose up -d --build
+# 查看口令：
+#   sudo docker compose logs mygopeed | head -40
 #
-#   3. 构建走国内源 —— Docker Hub / proxy.golang.org / dl-cdn.alpinelinux.org
-#      在这类环境里通常不可达或 DNS 抖动。
+# ── 为什么用 network_mode: host ──────────────────────────────────────
+# 这台 NAS 的 UGOS 把内核参数 net.ipv4.ip_forward 设成了 0，
+# 导致 docker 的 bridge 网络（172.17.0.0/16）完全没有出网能力：
+# 容器里连 223.5.5.5:53 都超时，apk/Go module 全部失败。
+# /volume1/docker 下已有的 ddns-go、v2raya 也都是 network_mode: host，
+# 所以本容器跟随同一惯例。host 网络下不需要 ports: 映射，
+# 监听即对外，BT 的 TCP+UDP 也一并可用。
 #
-# 用法：
-#   把本文件改名为 compose.yaml 放进 /volume1/docker/mygopeed/，然后
-#   sudo docker compose up -d --build
+# 端口占用：面板监听 8090（实测空闲）。
+# 宿主 9999 被 UGOS 自带 nginx 占用，与本方案已无关系（不再有 API_PORT）。
 
 services:
   mygopeed:
     build:
       context: .
       dockerfile: Dockerfile
-      # 见文件头第 1 条：bridge 无出网能力，构建期必须走宿主网络
+      # 同上：bridge 无出网能力，构建期拉 apk 包 / Go module 必须走宿主网络
       network: host
       args:
         VERSION: 1.9.3-my
+        # NAS 上 proxy.golang.org 不通，goproxy.cn 可达（实测 200 / 0.11s）
         GOPROXY: https://goproxy.cn,direct
+        # Docker Hub 直连不通，走 daocloud 镜像（两个 tag 均已实测可拉取）
         GO_IMAGE: docker.m.daocloud.io/library/golang:1.24.11-alpine3.23
         RUNTIME_IMAGE: docker.m.daocloud.io/library/alpine:3.23
-        # 官方 apk 源在部分网络下 DNS 抖动；留空则用官方源
+        # 官方 apk 源在国内不稳；阿里云 0.26s 可达
         APK_MIRROR: mirrors.aliyun.com
     image: mygopeed:1.9.3-my
     container_name: mygopeed
@@ -43,29 +54,31 @@ services:
 
     environment:
       TZ: Asia/Shanghai
+      # NAS 有 7.7G 内存，比 Zero3 宽裕
       GOMEMLIMIT: 800MiB
-      # 与 NAS 上的普通用户对齐（通常是 1000:10 或 1000:1000），
-      # 让容器写出的文件在 NAS 文件管理器里归自己而不是 root
+      # 与宿主 charles(1000):admin(10) 对齐，容器写出的文件在 NAS 界面上归 charles
       PUID: "1000"
-      PGID: "1000"
+      PGID: "10"
       UMASK: "022"
 
+      # 面板与 API 共用这一个端口（host 网络下直接监听宿主 8090）
       PANEL_PORT: "8090"
       PANEL_USER: gopeed
-      PANEL_PASS: "change-me"      # 改成自己的口令，或留空让容器随机生成并打印到日志
+      PANEL_PASS: "change-me"      # 面板登录口令，改成自己的后 up -d
       PANEL_AUTH: "on"
 
-      # 19999 而不是 9999，见文件头第 2 条
-      API_PORT: "19999"
+      # BT 监听端口，host 网络下 TCP+UDP 同时生效
       BT_LISTEN_PORT: "51413"
 
       DOWNLOAD_DIR: /downloads
       MAX_RUNNING: "5"
 
     volumes:
+      # 任务库与日志必须持久化，否则容器重建丢全部任务
       - ./config:/app/storage
-      # 宿主路径按自己 NAS 的实际目录改
+      # 下载落盘目录
       - /volume1/dl:/downloads
+      # 媒体库：容器内可读写 /media（未设白名单，新建任务时路径可填 /media/xxx）
       - /volume1/media:/media
 
     mem_limit: 1g

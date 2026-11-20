@@ -1,9 +1,12 @@
 # mygopeed / docker-compose.yml
 #
+# 面板已经 //go:embed 进 gopeed 二进制，UI 与 REST API 共用同一个端口，
+# 容器里只有一个进程，不需要 Caddy。
+#
 # 用法：
-#   1. 把本文件与 Dockerfile、.dockerignore、docker/ 一起放进仓库根目录
-#   2. docker compose build
-#   3. 首次启动前把 PANEL_PASS 改成你要的口令（或留空让容器随机生成，日志里会打印）
+#   1. 把本文件与 Dockerfile、.dockerignore、docker/、gopeed-patched/、gopeed-web/ 放在一起（仓库根目录即可）
+#   2. 首次启动前把 PANEL_PASS 改成你要的口令（或留空让容器随机生成，日志里会打印）
+#   3. docker compose build
 #   4. docker compose up -d
 #   5. 浏览器打开 http://<主机IP>:8090
 
@@ -22,7 +25,7 @@ services:
     restart: unless-stopped
 
     ports:
-      # 面板 + API（唯一对外端口）
+      # 面板 + REST API（唯一的对外端口）
       - "8090:8090"
       # BT：必须固定并同时映射 TCP 与 UDP，否则每次重启端口变化、外部无法连入
       - "51413:51413/tcp"
@@ -31,22 +34,18 @@ services:
     environment:
       TZ: Asia/Shanghai
       # Go 1.19+ 原生识别 GOMEMLIMIT：让 GC 在接近 cgroup 上限前就开始追赶，
-      # 比放任 runtime 摸到 mem_limit 被内核 OOM kill 要稳。
-      # 留出约 100MiB 给 caddy 和内核页缓存，别贴着 mem_limit 设
+      # 比放任 runtime 摸到 mem_limit 被内核 OOM kill 要稳
       GOMEMLIMIT: 400MiB
       # 容器内运行用户；下载目录属主由 entrypoint 按这两个值 chown
       PUID: "0"
       PGID: "0"
       UMASK: "022"
 
-      # 面板端口与鉴权（X-Panel-Key = base64(用户名:口令)，由 Caddy 校验）
+      # 面板与 API 共用这一个端口
       PANEL_PORT: "8090"
       PANEL_USER: gopeed
       PANEL_PASS: "change-me"      # 改成自己的口令；留空则每次启动随机生成并打印到日志
       PANEL_AUTH: "on"             # 强烈建议保持 on
-
-      # 后端 API 端口，只在容器内的 127.0.0.1 上监听，不需要对外映射
-      API_PORT: "9999"
 
       # BT 监听端口，必须与上面 ports 里的 51413 一致
       BT_LISTEN_PORT: "51413"
@@ -56,13 +55,13 @@ services:
       MAX_RUNNING: "3"
 
     volumes:
-      # 任务库 + 日志 + 配置（删了就要重新添加所有任务）
+      # 任务库 + 日志（删了就要重新添加所有任务）
       - ./data/storage:/app/storage
       # 下载目录（宿主上改成自己的大盘路径）
       - ./data/downloads:/downloads
 
-    # 原来 systemd 是 gopeed 单独 400M；现在同一容器里还要跑 caddy（空载约 30–40M），
-    # 所以抬到 512M 避免把 caddy 挤进 OOM。宿主吃紧就往下调，但别低于 384M。
+    # 单进程后不再需要给 Caddy 留内存，但 gopeed 自己解压大包时会吃内存，
+    # 400M 是原 systemd 的值，宿主吃紧就往下调，别低于 320M。
     mem_limit: 512m
     memswap_limit: 512m
 
